@@ -275,8 +275,11 @@ def _read_result(work: Path, token: str, wait: float,
 
 
 def _read_json(path: Path):
+    # utf-8-sig: помощник пишет через Set-Content -Encoding UTF8, а
+    # Windows PowerShell 5.1 добавляет BOM - обычный utf-8 его отвергает
+    # и результат операции "не находится" до таймаута.
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
 
@@ -463,8 +466,16 @@ def _winws_pid() -> int:
 
 def install_strategy(binpath: str, strategy_label: str,
                      exe: str = "", log=None) -> dict:
-    """Пересоздать службу с новым BinaryPathName и меткой стратегии."""
-    return run_action("install", {"binpath": binpath,
+    """Пересоздать службу с новым BinaryPathName и меткой стратегии.
+
+    Нормализация кавычек обязательна: batparser отдаёт ``\\"путь\\"`` -
+    так аргументы пишет service.bat, и там sc.exe (C-рантайм) превращает
+    экранированные кавычки в обычные. New-Service пишет строку в реестр
+    как есть, поэтому делаем замену сами: иначе winws получает битые пути
+    и служба падает с кодом 1067.
+    """
+    normalized = binpath.replace('\\"', '"')
+    return run_action("install", {"binpath": normalized,
                                   "strategy": strategy_label,
                                   "exe": exe},
                       wait=90, log=log) or {"ok": False, "error": "нет прав"}

@@ -282,6 +282,12 @@ def current_preset(root: Path | None, state: service.ServiceState,
             if line and not line.startswith("#"):
                 excludes.add(line.lower())
 
+    # Состояние может соответствовать нескольким пресетам (списки
+    # накапливаются: и ea.com, и ubisoft.com в исключениях). Выбираем
+    # того, чьи exclude_domains точнее всего покрыты - иначе подсветка
+    # показывала бы всегда первый по порядку пресет.
+    best: Preset | None = None
+    best_score = -1
     for preset in (presets or load_presets()):
         if preset.off:
             continue
@@ -295,8 +301,11 @@ def current_preset(root: Path | None, state: service.ServiceState,
             continue
         if any(d.lower() not in excludes for d in preset.exclude_domains):
             continue
-        return preset
-    return None
+        score = sum(1 for d in preset.exclude_domains
+                    if d.lower() in excludes)
+        if score > best_score:
+            best, best_score = preset, score
+    return best
 
 
 def _strategy_names(root: Path) -> list[str]:

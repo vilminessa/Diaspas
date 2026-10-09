@@ -14,8 +14,17 @@ def log(level: str, text: str) -> None:
     print(f"[{level}] {text}", flush=True)
 
 
+def brief(state_dict: dict) -> dict:
+    """Сократить состояние для вывода: без многокилобайтного binpath."""
+    out = dict(state_dict)
+    binpath = str(out.get("binpath") or "")
+    if len(binpath) > 60:
+        out["binpath"] = binpath[:57] + "..."
+    return out
+
+
 if __name__ == "__main__":
-    print("ДО:", service.state().__dict__)
+    print("ДО:", brief(service.state().__dict__))
     started = time.time()
     result = abtest.run(GROUP, log=log, wait=10.0)
     print(f"\n=== итог за {time.time() - started:.1f}s ===")
@@ -29,4 +38,4 @@ if __name__ == "__main__":
     print(f"с обходом:  {with_rep.get('count')}/{with_rep.get('total')}")
     if without:
         print(f"без обхода: {without.get('count')}/{without.get('total')}")
-    print("ПОСЛЕ:", service.state().__dict__)
+    print("ПОСЛЕ:", brief(service.state().__dict__))

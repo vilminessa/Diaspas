@@ -353,8 +353,9 @@ def _wait_result(work: Path, token: str, wait: float, log=None,
 
 
 def _read(path: Path):
+    # utf-8-sig: PowerShell 5.1 пишет UTF-8 с BOM (см. core/service._read_json)
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
 

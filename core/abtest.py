@@ -56,34 +56,51 @@ def run(group: str, log=None, wait: float = 8.0,
         log("info", "остановка службы zapret")
     stop_res = service.stop(log=log)
     if not stop_res.get("ok"):
+        # stop мог частично сработать (SCM остановил, помощник не ответил):
+        # вернём службу на всякий случай - она идемпотентна.
         err = str(stop_res.get("error") or "не удалось остановить службу")
         if log:
             log("error", err)
+        service.start(log=log)
         return {"ok": False, "error": err, "with": with_report}
 
-    # winws уходит не мгновенно: ждём, пока драйвер отпустит сокеты
-    deadline = time.time() + wait
-    while time.time() < deadline and service.state().running:
-        time.sleep(0.5)
-    time.sleep(1.0)
+    stopped_ok = True
+    try:
+        # winws уходит не мгновенно: ждём, пока драйвер отпустит сокеты
+        deadline = time.time() + wait
+        while time.time() < deadline and service.state().running:
+            time.sleep(0.5)
+        time.sleep(1.0)
 
-    if log:
-        log("info", "замер БЕЗ обхода")
-    without_report = probes.probe_group(group)
-    note("without", without_report)
-
-    if log:
-        log("info", "возврат службы zapret")
-    start_res = service.start(log=log)
-    if not start_res.get("ok"):
         if log:
-            log("warning", "не удалось вернуть службу автоматически - "
-                           "запустите вручную")
+            log("info", "замер БЕЗ обхода")
+        without_report = probes.probe_group(group)
+        note("without", without_report)
+    except BaseException:
+        # Любая цена (включая Ctrl+C) не должна оставлять ПК без обхода
+        if log:
+            log("warning", "возврат службы после сбоя A/B")
+        service.start(log=log)
+        raise
     else:
-        time.sleep(1.5)
-        after = probes.probe_group(group)
-        note("after", after)
+        if log:
+            log("info", "возврат службы zapret")
+        start_res = service.start(log=log)
+        if not start_res.get("ok"):
+            if log:
+                log("warning", "не удалось вернуть службу автоматически - "
+                               "запустите вручную")
+        else:
+            stopped_ok = False
+            time.sleep(1.5)
+            after = probes.probe_group(group)
+            note("after", after)
 
+    if stopped_ok:
+        return {"ok": False,
+                "error": "службу не удалось вернуть после теста - "
+                         "проверьте её вручную",
+                "with": with_report}
     return _verdict(group, with_report, without_report, log)
 
 
