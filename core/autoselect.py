@@ -309,7 +309,12 @@ def run(root, strategies: list[str] | None = None, log=None,
         if not started:
             return {"ok": False, "error": "задача перебора не стартовала"}
 
-    return _wait_result(work, token, wait, log=log, on_progress=on_progress)
+    # Перебор гасит winws в конце (finally помощника) - служба уходит в
+    # STOPPED. Запоминаем состояние, чтобы не оставить ПК без обхода.
+    was_running = service.state().running
+
+    return _wait_result(work, token, wait, log=log, on_progress=on_progress,
+                        restore=was_running)
 
 
 def cancel() -> None:
@@ -322,34 +327,41 @@ def cancel() -> None:
 
 
 def _wait_result(work: Path, token: str, wait: float, log=None,
-                 on_progress=None) -> dict | None:
+                 on_progress=None, restore: bool = False) -> dict | None:
     path = work / f"result-{token}.json"
     progress_path = work / f"progress-{token}.json"
     deadline = time.time() + wait
     last = None
-    while time.time() < deadline:
-        data = _read(path)
-        if data is not None:
-            for stale in (path, progress_path):
-                try:
-                    stale.unlink()
-                except OSError:
-                    pass
+    try:
+        while time.time() < deadline:
+            data = _read(path)
+            if data is not None:
+                for stale in (path, progress_path):
+                    try:
+                        stale.unlink()
+                    except OSError:
+                        pass
+                if log:
+                    log("info", f"перебор завершён: лучшая {data.get('best')!r}")
+                return data
+            if on_progress is not None:
+                cur = _read(progress_path)
+                if cur is not None and cur != last:
+                    last = cur
+                    try:
+                        on_progress(cur)
+                    except Exception:  # noqa: BLE001
+                        pass
+            time.sleep(0.3)
+        if log:
+            log("error", "перебор не уложился в отведённое время")
+        return None
+    finally:
+        # Всегда (успех, таймаут, исключение) возвращаем обход, если он был
+        if restore and not service.state().running:
             if log:
-                log("info", f"перебор завершён: лучшая {data.get('best')!r}")
-            return data
-        if on_progress is not None:
-            cur = _read(progress_path)
-            if cur is not None and cur != last:
-                last = cur
-                try:
-                    on_progress(cur)
-                except Exception:  # noqa: BLE001
-                    pass
-        time.sleep(0.3)
-    if log:
-        log("error", "перебор не уложился в отведённое время")
-    return None
+                log("info", "восстановление службы после перебора")
+            service.start(log=log)
 
 
 def _read(path: Path):
