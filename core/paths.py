@@ -1,7 +1,7 @@
 """Расположение файлов Diaspas и обнаружение установки zapret.
 
-Запасной путь для всего, что пишется на диск: %LOCALAPPDATA%\Diaspas.
-Папка с zapret ищется по стандартным местам и по записанной в настройках —
+Запасной путь для всего, что пишется на диск: %LOCALAPPDATA%\\Diaspas.
+Папка с zapret ищется по стандартным местам и по записанной в настройках -
 сама Diaspas бинарники zapret не создаёт, только распаковывает релиз
 пользователя в его же директорию.
 """
@@ -66,15 +66,16 @@ def strategy_files(root: Path) -> list[str]:
     """Имена general*.bat в порядке естественной сортировки.
 
     Порядок совпадает с меню Install Service из service.bat: ALT, ALT2 ...
-    ALT13, затем остальные — цифры выравниваются ведущими нулями.
+    ALT13, затем остальные - цифры выравниваются ведущими нулями до 8
+    разрядов (тот же приём PadLeft(8, '0') в service.bat).
     """
     import re
 
+    def natural(name: str) -> str:
+        return re.sub(r"\d+", lambda m: m.group(0).zfill(8), name)
+
     names = [p.name for p in root.glob("general*.bat") if p.name != "service.bat"]
-    if not names:
-        return []
-    return sorted(names, key=lambda n: [int(x) if x.isdigit() else x
-                                        for x in re.split(r"(\d+)", n)])
+    return sorted(names, key=natural)
 
 
 def strategy_label(filename: str) -> str:
