@@ -129,3 +129,19 @@ def zapret_dir_from_settings() -> Path | None:
         if is_zapret_dir(path):
             return path
     return zapret_install_dir()
+
+
+def zapret_dir_info() -> tuple[Path | None, str]:
+    """(папка, откуда взялась) - для честного отображения в UI.
+
+    Автопоиск молча подставлял старую установку вместо «скачанной» -
+    пользователь не понимал, к какой папке применяется пресет.
+    Источник: settings (записана Diaspas) | autodiscover | None.
+    """
+    configured = str(read_settings().get("zapret_dir") or "").strip()
+    if configured:
+        path = Path(configured)
+        if is_zapret_dir(path):
+            return path, "settings"
+    found = zapret_install_dir()
+    return found, ("autodiscover" if found else "")

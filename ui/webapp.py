@@ -73,7 +73,7 @@ class App:
 
     def __init__(self) -> None:
         self.emitter = Emitter()
-        self.zapret_root: Path | None = paths.zapret_dir_from_settings()
+        self.zapret_root, self.zapret_source = paths.zapret_dir_info()
         self.last_probes: dict | None = None
         self._select_running = False
         # один warning о пропавшей службе на сессию - без спама в журнал
@@ -95,6 +95,39 @@ class App:
         """
         self.log("info", "фронтенд подключился: мост JS<->Python работает")
         return {"ok": True, "app": "Diaspas", "ui": "webview"}
+
+    # -- права администратора (warm-up задачи) ---------------------------
+
+    def prepare_privileges(self) -> dict:
+        """Есть ли служебная задача планировщика (нужна для операций).
+
+        Нет задачи = первая операция потребует UAC. Фронтенд спрашивает
+        согласие заранее - при старте, а не посреди работы.
+        """
+        have = service.task_exists()
+        if not have:
+            self.log("info", "служебная задача не зарегистрирована - "
+                             "нужно одно подтверждение администратора")
+        # тексты диалога приходят из Python: одна точка правды для перевода
+        return {"ok": True, "have_task": have,
+                "title": tr("uac.title"), "body": tr("uac.body"),
+                "declined": tr("uac.declined")}
+
+    def register_task_now(self) -> dict:
+        """Регистрация задачи - ЕДИНСТВЕННЫЙ UAC за весь срок работы."""
+        if service.task_exists():
+            return {"ok": True, "already": True}
+        self.log("info", "регистрация служебной задачи: "
+                         "сейчас Windows спросит права администратора")
+        self.emitter.emit("toast", {
+            "text": tr("uac.incoming"), "kind": ""})
+        ok = service.register_task()
+        if ok:
+            self.log("info", "задача зарегистрирована - дальше без UAC")
+        else:
+            self.log("warning", "регистрация отклонена - потребуется "
+                                "подтверждение при каждой операции")
+        return {"ok": True, "registered": bool(ok)}
 
     # -- состояние -----------------------------------------------------
 
@@ -131,6 +164,7 @@ class App:
             "strategy": st.strategy,
             "pid": st.pid,
             "dir_ok": dir_ok,
+            "dir_source": self.zapret_source,
             "preset_key": current.key if current else None,
             "preset_title": current.title if current else None,
             # что предложить, если службы нет: последний применявшийся
@@ -162,6 +196,11 @@ class App:
         if self.zapret_root is None:
             return {"ok": False, "error": tr("err.no_dir")}
         self.log("info", f"применение пресета {preset.title!r}")
+        if not service.task_exists():
+            # окно UAC появится неожиданно - предупредить заранее
+            self.log("info", tr("uac.incoming"))
+            self.emitter.emit("toast",
+                              {"text": tr("uac.incoming"), "kind": ""})
         res = presets_mod.apply(preset, self.zapret_root, log=self.log)
         self.emitter.emit("state", self.state())
         return res
@@ -242,6 +281,7 @@ class App:
             settings["zapret_release"] = rel.tag
             paths.write_settings(settings)
             self.zapret_root = root
+            self.zapret_source = "settings"
             self.log("info", f"установлено: {root} (релиз {rel.tag})")
             self.emitter.emit("state", self.state())
             # Релиз установлен, но служба создаётся только пресетом:
@@ -285,6 +325,7 @@ class App:
             settings["zapret_dir"] = str(path)
             paths.write_settings(settings)
             self.zapret_root = path
+            self.zapret_source = "settings"
             self.log("info", f"папка zapret: {path}")
             self.emitter.emit("state", self.state())
             return {"ok": True, "path": str(path)}
@@ -332,6 +373,8 @@ def run() -> int:
     # инстанса не биндятся - вызов приходит ровно как из JS.
     api = type("Api", (), {})()
     api.hello = guard(app.hello)
+    api.prepare_privileges = guard(app.prepare_privileges)
+    api.register_task_now = guard(app.register_task_now)
     api.state = guard(app.state)
     api.presets = guard(app.presets)
     api.apply_preset = guard(app.apply_preset)

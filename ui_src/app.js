@@ -95,7 +95,9 @@ function renderState(st) {
     sub = st.zapret_dir || "";
   } else if (st.dir_ok) {
     cls = "warn"; headline = "Служба не установлена";
-    sub = `Папка релиза на месте: ${st.zapret_dir} — пресет ещё не применён`;
+    const src = st.dir_source === "settings"
+      ? "Папка релиза" : "Папка из автопоиска (старая установка)";
+    sub = `${src}: ${st.zapret_dir} — пресет ещё не применён`;
   } else {
     cls = "unknown"; headline = "Папка zapret не найдена";
     sub = "Скачай последний релиз или укажи папку вручную";
@@ -149,7 +151,8 @@ async function createService(key) {
     `Папка релиза на месте, но служба zapret не установлена.\n\n` +
     `Применить пресет «${p.title}»? Он создаст службу и включит обход.`);
   if (!okBox) return;
-  await applyPreset(p);
+  // confirmed=true: вопрос уже задан - applyPreset не должен спрашивать снова
+  await applyPreset(p, true);
 }
 
 async function refreshState() {
@@ -177,15 +180,18 @@ function renderPresets(presets) {
   });
 }
 
-async function applyPreset(p) {
+async function applyPreset(p, confirmed = false) {
   if (S.busy) return;
-  const what = p.off
-    ? "Служба zapret будет удалена, winws остановлен."
-    : `Стратегия: ${p.strategy}${p.game_filter ? `, Game Filter: ${p.game_filter}` : ""}` +
-      `${p.ipset ? `, IPSet: ${p.ipset}` : ""}` +
-      `${p.exclude_domains && p.exclude_domains.length ? ", исключения: " + p.exclude_domains.join(", ") : ""}`;
-  const ok = await confirmBox(`Пресет «${p.title}»`, what + "\n\nПродолжить?");
-  if (!ok) return;
+  // один вопрос на операцию: createService уже спросил - второй раз не спрашиваем
+  if (!confirmed) {
+    const what = p.off
+      ? "Служба zapret будет удалена, winws остановлен."
+      : `Стратегия: ${p.strategy}${p.game_filter ? `, Game Filter: ${p.game_filter}` : ""}` +
+        `${p.ipset ? `, IPSet: ${p.ipset}` : ""}` +
+        `${p.exclude_domains && p.exclude_domains.length ? ", исключения: " + p.exclude_domains.join(", ") : ""}`;
+    const ok = await confirmBox(`Пресет «${p.title}»`, what + "\n\nПродолжить?");
+    if (!ok) return;
+  }
 
   setBusy(true, `применяю пресет «${p.title}»…`);
   try {
@@ -491,7 +497,34 @@ async function init() {
     renderPresets(await api().presets());
     await refreshState();
     $("#statusbar-text").textContent = "готов";
+    await warmupPrivileges();
   } catch (e) {
     toast("Ошибка инициализации: " + e, "err");
+  }
+}
+
+async function warmupPrivileges() {
+  // Единственный UAC за весь срок: задача планировщика регистрируется
+  // при старте, а не посреди операции - иначе окно Windows легко
+  // не заметить за окном Diaspas, и «ничего не произошло».
+  const info = await api().prepare_privileges();
+  if (!info || info.have_task) return;
+  const ok = await confirmBox(info.title || "Права администратора",
+                              info.body || "Подтвердить?");
+  if (!ok) {
+    toast(info.declined || "Отклонено: UAC потребуется при операциях", "err");
+    return;
+  }
+  setBusy(true, "регистрирую служебную задачу…");
+  try {
+    const res = await api().register_task_now();
+    if (res && res.registered) {
+      toast("Готово: дальше операции без запросов прав", "ok");
+    } else {
+      toast("Не подтверждено: операции будут спрашивать права", "err");
+    }
+  } finally {
+    setBusy(false, "готов");
+    await refreshState();
   }
 }

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -253,6 +254,27 @@ def apply(preset: Preset, root: Path, log=None) -> dict:
 
     label = _label(preset.strategy)
     res = service.install_strategy(binpath, label, log=log)
+    if not res.get("ok"):
+        return _finish(preset, res, log)
+
+    # Служба установлена - но установлена ≠ работает: winws может упасть
+    # сразу (1067: битые пути, занятый WinDivert, антивирус). Раньше UI
+    # показывал «применён», а обхода не было - теперь ждём факта.
+    deadline = time.time() + 6
+    st = service.state()
+    while time.time() < deadline and not st.running:
+        time.sleep(0.5)
+        st = service.state()
+    if not st.running:
+        detail = (f"код выхода {st.exit_code}" if st.exit_code
+                  else "код выхода неизвестен")
+        msg = (f"служба установлена, но winws не запустился ({detail}) - "
+               f"смотри журнал и winws в диспетчере задач")
+        if log:
+            log("error", msg)
+        return {"ok": False, "error": msg, "preset": preset.key}
+    if log:
+        log("info", f"служба работает: pid {st.pid}")
     return _finish(preset, res, log)
 
 
