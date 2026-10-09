@@ -25,9 +25,15 @@ PARTS = ("index.html", "app.css", "app.js")
 
 
 def digests() -> dict[str, str]:
+    """SHA-256 частей с нормализацией переводов строк.
+
+    Без нормализации check падал в CI: git отдаёт CRLF (autocrlf), а
+    bundle.py хэшировался от локальных LF - «расхождение» чисто из-за
+    платформы. Единица сравнения - текст, а не байты с \r\n.
+    """
     result = {}
     for name in PARTS:
-        data = (SRC / name).read_bytes()
+        data = (SRC / name).read_bytes().replace(b"\r\n", b"\n")
         result[name] = hashlib.sha256(data).hexdigest()
     return result
 
