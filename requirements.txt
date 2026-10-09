@@ -1,8 +1,8 @@
-# Diaspas runs on Python 3.11+ (uses stdlib only).
-# No mandatory third-party runtime dependencies:
-#   - Tkinter ships with the standard Windows Python installer
-#   - GitHub API is queried with urllib
-#   - service management uses ctypes / subprocess
+# Diaspas runs on Python 3.11+ and uses the standard library at runtime
+# (Tkinter, urllib, ctypes). PyInstaller is build-time only.
 #
-# Build-time dependencies (not needed to run from source):
+# pytest и pyflakes используются CI (.github/workflows) и локальными
+# прогонами `python -m pytest tests/`.
 pyinstaller>=6.0
+pytest>=8.0
+pyflakes>=3.0
