@@ -17,6 +17,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from core import abtest, autoselect, presets as presets_mod, probes, release, service
+from core import log as dlog
 from core import paths
 from i18n import tr
 
@@ -135,15 +136,28 @@ class App(tk.Tk):
                   foreground="#888", wraplength=820,
                   justify="left").pack(fill="x", padx=8)
 
+        # хвост персистентного журнала - при повторном запуске видно,
+        # что было до закрытия окна
+        for line in dlog.tail(15):
+            self._append_log("old", line)
+
     # -- журнал и мост потоков ---------------------------------------------
 
     def log(self, level: str, text: str) -> None:
-        """Потокобезопасная запись в журнал (вызывается из любого потока)."""
+        """Потокобезопасная запись: в окно (очередь) и на диск.
+
+        Диск обязателен: журнал окна живёт в памяти и исчезает вместе с
+        закрытым окном - именно поэтому диагностика «посмотри лог» была
+        невозможна.
+        """
+        dlog.write(level, text)
         self._q.put(("log", level, text))
 
     def _append_log(self, level: str, text: str) -> None:
         self._log.configure(state="normal")
-        self._log.insert("end", f"[{level}] {text}\n")
+        # строки из tail() уже содержат метку времени - не дублируем
+        prefix = "" if level == "old" else f"[{level}] "
+        self._log.insert("end", f"{prefix}{text}\n")
         self._log.see("end")
         self._log.configure(state="disabled")
 
@@ -184,13 +198,14 @@ class App(tk.Tk):
         self._cancel_btn.configure(state="normal" if busy else "disabled")
 
     def _bg(self, fn, *args, **kwargs) -> None:
-        """Запустить в фоне; исходная ошибка попадает в журнал."""
+        """Запустить в фоне; исходная ошибка попадает в журнал (с диска)."""
 
         def runner() -> None:
             try:
                 fn(*args, **kwargs)
             except Exception:  # noqa: BLE001 - GUI не должно падать
-                self.log("error", traceback.format_exc(limit=4))
+                dlog.exception("фоновая операция")
+                self.log("error", traceback.format_exc(limit=6))
 
         threading.Thread(target=runner, daemon=True).start()
 

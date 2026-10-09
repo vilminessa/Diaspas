@@ -85,19 +85,30 @@ def latest_release() -> Release:
 
 
 def download(release: Release, progress=None) -> Path:
-    """Скачать zip в кэш Diaspas; progress(байт, всего|None) - по ходу."""
+    """Скачать zip в кэш Diaspas; progress(байт, всего|None) - по ходу.
+
+    Оборванное соединение не должно выглядеть как успех: полученные байты
+    сверяются с Content-Length, а битый кэш с предыдущей попытки
+    перекачивается заново, а не переиспользуется.
+    """
     paths.cache_dir().mkdir(parents=True, exist_ok=True)
     target = paths.cache_dir() / f"zapret-{release.tag}.zip"
     if target.is_file() and target.stat().st_size > 0:
-        if progress:
-            progress(target.stat().st_size, target.stat().st_size)
-        return target
+        if zipfile.is_zipfile(target):
+            if progress:
+                progress(target.stat().st_size, target.stat().st_size)
+            return target
+        # битый кэш от прошлой попытки (обрыв при записи) - удаляем
+        try:
+            target.unlink()
+        except OSError:
+            pass
 
     request = Request(release.zip_url, headers={"User-Agent": _USER_AGENT})
+    tmp = target.with_suffix(".zip.part")
     try:
         with urlopen(request, timeout=_TIMEOUT) as response:
             total = int(response.headers.get("Content-Length") or 0) or None
-            tmp = target.with_suffix(".zip.part")
             done = 0
             with open(tmp, "wb") as out:
                 while True:
@@ -108,12 +119,35 @@ def download(release: Release, progress=None) -> Path:
                     done += len(chunk)
                     if progress:
                         progress(done, total)
+            if total is not None and done != total:
+                raise ReleaseError(
+                    f"скачивание оборвано: получено {done} из {total} байт")
+            if not zipfile.is_zipfile(tmp):
+                raise ReleaseError("скачанный файл не является zip-архивом")
             tmp.replace(target)
             return target
     except HTTPError as exc:
+        _cleanup(tmp)
         raise ReleaseError(f"не удалось скачать релиз: HTTP {exc.code}") from exc
     except URLError as exc:
+        _cleanup(tmp)
         raise ReleaseError(f"обрыв скачивания: {exc.reason}") from exc
+    except ReleaseError:
+        _cleanup(tmp)
+        raise
+    except OSError as exc:
+        _cleanup(tmp)
+        raise ReleaseError(
+            f"не удалось записать файл (проверьте антивирус/диск): {exc}"
+        ) from exc
+
+
+def _cleanup(part: Path) -> None:
+    """Удалить недокачанный .part - следующая попытка начнётся чистой."""
+    try:
+        part.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def install(zip_path: Path, dest: Path, progress=None) -> Path:
@@ -121,23 +155,41 @@ def install(zip_path: Path, dest: Path, progress=None) -> Path:
 
     Архив Flowseal распаковывается в подпапку с именем версии; если её нет
     (изменилась структура релиза), содержимое кладётся в dest напрямую.
+
+    Каждый шаг обёрнут в ReleaseError с указанием, где встало: пустая папка
+    после сбоя - ровно та проблема, что ловили на живой системе.
     """
     dest = Path(dest)
-    if dest.exists():
-        shutil.rmtree(dest, ignore_errors=True)
-    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+        dest.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ReleaseError(
+            f"не удалось подготовить папку {dest}: {exc}") from exc
 
     try:
         with zipfile.ZipFile(zip_path) as zf:
+            # у ZipInfo атрибут file_size, а не size - поиск несуществующего
+            # поля ронял установку ДО распаковки и оставлял пустую папку
             members = zf.infolist()
-            total = sum(m.size for m in members) or None
-            done = 0
+            total = sum(m.file_size for m in members) or None
             zf.extractall(dest)
-            done = total or 0
             if progress and total:
-                progress(done, total)
+                progress(total, total)
     except zipfile.BadZipFile as exc:
-        raise ReleaseError("скачанный файл повреждён (не zip)") from exc
+        # битый кэш убираем: иначе следующая попытка возьмёт его же
+        try:
+            Path(zip_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ReleaseError(
+            "архив повреждён и удалён из кэша - повторите скачивание"
+        ) from exc
+    except OSError as exc:
+        raise ReleaseError(
+            "распаковка не удалась (антивирус может блокировать запись "
+            f"WinDivert): {exc}") from exc
 
     # Найти распакованную папку: если zip содержал единственный каталог - он и есть.
     entries = [p for p in dest.iterdir() if p.is_dir()]
@@ -146,14 +198,44 @@ def install(zip_path: Path, dest: Path, progress=None) -> Path:
 
     if not (root / "service.bat").is_file():
         raise ReleaseError("в распакованном релизе нет service.bat")
-    if not (root / "LICENSE.txt").is_file():
-        # Не фатально, но NOTICE-обязательство важнее: пометим.
-        (root / "LICENSE.txt").write_text(
-            "LICENSE.txt отсутствовал в релизе. Оригинал:\n"
-            f"https://github.com/{paths.ZAPRET_OWNER}/"
-            f"{paths.ZAPRET_REPO}/blob/main/LICENSE.txt\n",
-            encoding="utf-8")
+    _ensure_license(root)
     return root
+
+
+def _ensure_license(root: Path) -> None:
+    """LICENSE.txt в папке установки - обязательство MIT.
+
+    В релизах Flowseal файла нет (проверено на 1.10.3: в архиве только
+    .bat), поэтому тянем оригинал с GitHub raw; если и там не вышло -
+    оставляем указатель на первоисточник. Ссылка без текста - минимум,
+    а не норма.
+    """
+    target = root / "LICENSE.txt"
+    if target.is_file() and target.stat().st_size > 200:
+        return
+
+    url = (f"https://raw.githubusercontent.com/{paths.ZAPRET_OWNER}/"
+           f"{paths.ZAPRET_REPO}/main/LICENSE.txt")
+    try:
+        request = Request(url, headers={"User-Agent": _USER_AGENT})
+        with urlopen(request, timeout=_TIMEOUT) as response:
+            text = response.read().decode("utf-8", "replace")
+        if "MIT License" in text:
+            target.write_text(text, encoding="utf-8", newline="\n")
+            return
+    except (HTTPError, URLError, OSError, ValueError):
+        pass  # ниже - запасной указатель
+
+    try:
+        target.write_text(
+            "LICENSE.txt отсутствовал в релизе, а загрузить с GitHub не "
+            "удалось. Оригинал:\n"
+            f"{url}\n\n"
+            f"Источник: https://github.com/{paths.ZAPRET_OWNER}/"
+            f"{paths.ZAPRET_REPO}\n",
+            encoding="utf-8", newline="\n")
+    except OSError:
+        pass
 
 
 def update_installed(dest: Path, progress=None) -> Path:
