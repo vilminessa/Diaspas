@@ -79,13 +79,28 @@ def strategy_files(root: Path) -> list[str]:
 
 
 def strategy_label(filename: str) -> str:
-    """general (ALT11).bat -> ALT11; general.bat -> general."""
+    """general (ALT11).bat -> ALT11; general.bat -> general.
+
+    Короткая метка для отображения в GUI.
+    """
     name = filename
     if name.lower().endswith(".bat"):
         name = name[:-4]
     if name.lower().startswith("general"):
         name = name[7:].strip(" ()")
     return name or "general"
+
+
+def strategy_stem(filename: str) -> str:
+    """general (ALT11).bat -> general (ALT11): метка в реестре.
+
+    Ровно то, что пишет service.bat (``%%~nF``) - храним так же, чтобы
+    Diaspas читал установки, поставленные штатным менеджером, и наоборот.
+    """
+    name = filename
+    if name.lower().endswith(".bat"):
+        name = name[:-4]
+    return name
 
 
 def read_settings() -> dict:

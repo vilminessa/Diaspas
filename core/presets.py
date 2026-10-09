@@ -219,8 +219,8 @@ def apply(preset: Preset, root: Path, log=None) -> dict:
 
 
 def _label(strategy_file: str) -> str:
-    from .paths import strategy_label
-    return strategy_label(strategy_file)
+    from .paths import strategy_stem
+    return strategy_stem(strategy_file)
 
 
 def _finish(preset: Preset, res: dict, log=None) -> dict:
@@ -245,21 +245,23 @@ def current_preset(root: Path | None, state: service.ServiceState,
         return None
     if root is None or not state.strategy:
         return None
+    root_path = Path(root)
+    # Метка в реестре - имя без .bat (как пишет service.bat)
+    from .paths import strategy_stem
     strategy_file = ""
     for name in _strategy_names(root):
-        from .paths import strategy_label
-        if strategy_label(name) == state.strategy:
+        if strategy_stem(name) == state.strategy:
             strategy_file = name
             break
     if not strategy_file:
         return None
 
-    root_path = Path(root)
     gf_flag = root_path / "utils" / "game_filter.enabled"
     game_filter = ""
     if gf_flag.is_file():
         game_filter = gf_flag.read_text(encoding="ascii",
                                         errors="replace").strip()
+
     ipset_file = root_path / "lists" / "ipset-all.txt"
     ipset = ""
     if ipset_file.is_file():

@@ -373,11 +373,12 @@ class ServiceState:
 
 
 def state(log=None) -> ServiceState:
-    """Снимок службы; при недоступности помощника - «не установлено»."""
-    res = run_action("state", wait=30, log=log)
-    if res and res.get("ok") and res.get("state"):
-        return ServiceState.from_dict(res["state"])
-    # Быстрый путь без прав: статус читается и без помощника.
+    """Снимок службы - без повышения прав.
+
+    Статус читается через sc query и HKLM: права нужны только для
+    установки/перезапуска, поэтому обычное обновление карточки не должно
+    дёргать UAC. Помощник остаётся для операций изменения.
+    """
     return _state_local()
 
 
@@ -396,6 +397,7 @@ def _state_local() -> ServiceState:
 
     label = ""
     binpath = ""
+    start_type = ""
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
@@ -404,12 +406,22 @@ def _state_local() -> ServiceState:
                 label = str(winreg.QueryValueEx(key, "zapret-discord-youtube")[0])
             except OSError:
                 pass
-            binpath = str(winreg.QueryValueEx(key, "ImagePath")[0])
+            try:
+                # 2 = SERVICE_AUTO_START, 3 = DEMAND
+                raw = int(winreg.QueryValueEx(key, "Start")[0])
+                start_type = {2: "Automatic", 3: "Manual",
+                              4: "Disabled"}.get(raw, str(raw))
+            except OSError:
+                pass
+            try:
+                binpath = str(winreg.QueryValueEx(key, "ImagePath")[0])
+            except OSError:
+                pass
     except OSError:
         pass
 
     return ServiceState(installed=installed, running=running,
-                        start_type="", strategy=label,
+                        start_type=start_type, strategy=label,
                         pid=_winws_pid(), binpath=binpath)
 
 
