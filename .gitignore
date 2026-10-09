@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+*.spec.bak
+
+# PyInstaller
+*.manifest
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Logs and local state
+*.log
+local_state.json
