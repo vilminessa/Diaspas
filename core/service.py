@@ -14,6 +14,7 @@ WinDivert работает только от администратора, а с
 from __future__ import annotations
 
 import ctypes
+import ctypes.wintypes  # нужен _winws_pid: структура PROCESSENTRY32
 import json
 import subprocess
 import time
@@ -387,8 +388,6 @@ def state(log=None) -> ServiceState:
 
 def _state_local() -> ServiceState:
     """Состояние без повышения прав - хватает для отображения в GUI."""
-    import ctypes.wintypes
-
     try:
         out = subprocess.run(["sc", "query", "zapret"],
                              capture_output=True, timeout=15)

@@ -18,10 +18,7 @@ import json
 import time
 from pathlib import Path
 
-from . import probes, service
-from .paths import strategy_files, strategy_label
-
-
+from . import service
 # -- помощник (PowerShell) -------------------------------------------------
 # Тот же контракт, что у service_runner: request.json -> result-<token>.json,
 # промежуточные итоги - progress-<token>.json.

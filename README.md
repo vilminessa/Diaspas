@@ -42,7 +42,35 @@ Ubisoft) одной кнопкой.
 Операции со службой выполняются через служебную задачу
 Windows с уровнем Highest: единственный запрос UAC при
 регистрации задачи, дальше Diaspas запускает её через
-`schtasks /Run` без диалогов.
+`schtasks /Run` без диалогов. Всего две задачи:
+`DiaspasService` (служба) и `DiaspasSelector` (перебор
+стратегий).
+
+Состояние службы читается **без прав** (`sc query` +
+реестр) — обычная проверка карточки не дёргает UAC.
+
+## Запуск из исходников
+
+```
+python main.py
+```
+
+Зависимости — только стандартная библиотека
+(Tkinter, urllib, ctypes). Тесты:
+
+```
+pip install pytest
+python -m pytest tests/
+```
+
+Ручные прогоны (нужна сеть, часть — UAC):
+
+```
+python tests/run_probes.py        # пробы всех групп
+python tests/run_ab.py ubisoft    # A/B-тест по группе
+python tests/run_select.py        # автоподбор (подмножество)
+python tests/run_ubisoft_fix.py   # применить пресет end-to-end
+```
 
 ## Сборка
 
@@ -50,6 +78,19 @@ Windows с уровнем Highest: единственный запрос UAC п�
 pip install -r requirements.txt
 pyinstaller diaspas.spec
 ```
+
+Готовый `dist/Diaspas.exe` — onefile, ~12,5 МБ.
+
+## Статус
+
+Реализовано: установка релизов с GitHub, пресеты,
+управление службой (один UAC), пробы Discord/YouTube/EA/
+Ubisoft, A/B-диагностика, автоподбор стратегий, GUI.
+
+Проверено на живой системе: A/B достоверно разводит
+«ломает zapret» / «блокирует DPI»; пресет «Ubisoft»
+чинит `account.ubisoft.com` (было 2/3 → стало 3/3);
+перебор возвращается к ALT11/ALT12 как к полным.
 
 ## Лицензия
 
