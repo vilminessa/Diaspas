@@ -76,6 +76,8 @@ class App:
         self.zapret_root: Path | None = paths.zapret_dir_from_settings()
         self.last_probes: dict | None = None
         self._select_running = False
+        # один warning о пропавшей службе на сессию - без спама в журнал
+        self._warned_missing_service = False
 
     # -- журнал --------------------------------------------------------
 
@@ -108,14 +110,35 @@ class App:
                 self.log("exception", "распознавание пресета")
                 current = None
         settings = paths.read_settings()
+
+        # Папка релиза и служба - разные сущности: «скачал релиз» ≠
+        # «служба стоит». Если папка есть, а службы нет - это либо свежая
+        # установка (пресет не применён), либо службу удалили вне
+        # интерфейса; во втором случае следующая диагностика должна
+        # найти след в журнале, а не гадать.
+        dir_ok = self.zapret_root is not None
+        if dir_ok and not st.installed and not self._warned_missing_service:
+            self._warned_missing_service = True
+            self.log("warning",
+                     "папка релиза на месте, а службы zapret нет - "
+                     "пресет не применён или служба удалена вне интерфейса "
+                     "(service.bat / ручная чистка)")
+
         return {
             "installed": st.installed,
             "running": st.running,
             "start_type": st.start_type,
             "strategy": st.strategy,
             "pid": st.pid,
+            "dir_ok": dir_ok,
             "preset_key": current.key if current else None,
             "preset_title": current.title if current else None,
+            # что предложить, если службы нет: последний применявшийся
+            # пресет (маркер); без маркера - базовый, безопасный пресет
+            # (без игровых фильтров), чтобы цикл «скачал -> создал службу»
+            # не зависел от наличия маркера в settings
+            "suggested_preset": (presets_mod.active_preset_key()
+                                 or "discord_youtube"),
             "zapret_dir": str(self.zapret_root) if self.zapret_root else None,
             "release_note": settings.get("zapret_release") or "",
         }
@@ -221,7 +244,22 @@ class App:
             self.zapret_root = root
             self.log("info", f"установлено: {root} (релиз {rel.tag})")
             self.emitter.emit("state", self.state())
-            return {"ok": True, "tag": rel.tag, "path": str(root)}
+            # Релиз установлен, но служба создаётся только пресетом:
+            # без явного следующего шага пользователь видит «не найдена»
+            # и решает, что скачивание сломалось
+            st = service.state()
+            needs_preset = not st.installed
+            result = {"ok": True, "tag": rel.tag, "path": str(root),
+                      "needs_preset": needs_preset}
+            if needs_preset:
+                key = presets_mod.active_preset_key() or "discord_youtube"
+                result["active_preset"] = key
+                title = next(
+                    (p.title for p in presets_mod.load_presets()
+                     if p.key == key), key)
+                self.log("info",
+                         f"служба не создана - предлагаю пресет «{title}»")
+            return result
         except release.ReleaseError as exc:
             self.log("error", f"установка: {exc}")
             return {"ok": False, "error": str(exc)}

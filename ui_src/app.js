@@ -83,18 +83,32 @@ function switchTab(name) {
 function renderState(st) {
   S.state = st;
   const run = st.running;
-  const cls = run ? "ok" : (st.installed ? "warn" : "unknown");
-  const text = run ? "работает" : (st.installed ? "остановлена" : "не установлена");
+  // Четыре разных состояния вместо двух: «скачал релиз» ≠ «служба стоит».
+  // Раньше отсутствие службы показывалось как «Установка не найдена»,
+  // и после успешного скачивания экран выглядел сломанным.
+  let cls, headline, sub;
+  if (run) {
+    cls = "ok"; headline = "Обход работает";
+    sub = st.zapret_dir || "";
+  } else if (st.installed) {
+    cls = "warn"; headline = "Служба остановлена";
+    sub = st.zapret_dir || "";
+  } else if (st.dir_ok) {
+    cls = "warn"; headline = "Служба не установлена";
+    sub = `Папка релиза на месте: ${st.zapret_dir} — пресет ещё не применён`;
+  } else {
+    cls = "unknown"; headline = "Папка zapret не найдена";
+    sub = "Скачай последний релиз или укажи папку вручную";
+  }
 
   const pill = $("#top-status");
   pill.className = `status-pill status-${cls}`;
-  pill.querySelector(".status-text").textContent = text;
+  pill.querySelector(".status-text").textContent =
+    run ? "работает" : (st.installed ? "остановлена" : "нет службы");
 
   $("#state-dot").className = `big-dot ${cls}`;
-  $("#state-headline").textContent = run
-    ? "Обход работает"
-    : (st.installed ? "Служба остановлена" : "Установка не найдена");
-  $("#state-sub").textContent = st.zapret_dir || "";
+  $("#state-headline").textContent = headline;
+  $("#state-sub").textContent = sub;
 
   $("#v-service").textContent = st.installed
     ? (run ? "работает" : "остановлена") : "не установлена";
@@ -104,6 +118,17 @@ function renderState(st) {
   $("#zapret-path").textContent = st.zapret_dir || "папка не найдена";
   $("#zapret-path").title = st.zapret_dir || "";
 
+  // кнопка «Создать службу»: папка есть, а службы нет
+  const need = st.dir_ok && !st.installed;
+  $("#btn-create-service").classList.toggle("hidden", !need);
+  if (need) {
+    const key = st.suggested_preset;
+    const name = (S.presets.find((p) => p.key === key) || {}).title;
+    $("#btn-create-service").textContent = name
+      ? `Создать службу — пресет «${name}»` : "Создать службу (выберите пресет)";
+    $("#btn-create-service").onclick = () => createService(key);
+  }
+
   // подсветка активного пресета
   document.querySelectorAll(".preset-card").forEach((c) => {
     c.classList.toggle("active", !!st.preset_key && c.dataset.key === st.preset_key);
@@ -112,6 +137,19 @@ function renderState(st) {
   });
 
   if (st.release_note) $("#release-note").textContent = st.release_note;
+}
+
+async function createService(key) {
+  const p = S.presets.find((x) => x.key === key);
+  if (!p || p.off || !key) {
+    toast("Выберите пресет в разделе «Пресеты»", "");
+    return;
+  }
+  const okBox = await confirmBox("Создать службу",
+    `Папка релиза на месте, но служба zapret не установлена.\n\n` +
+    `Применить пресет «${p.title}»? Он создаст службу и включит обход.`);
+  if (!okBox) return;
+  await applyPreset(p);
 }
 
 async function refreshState() {
@@ -365,6 +403,14 @@ async function installRelease() {
     const res = await api().install_release();
     if (res && res.ok) {
       toast("Релиз установлен: " + (res.tag || ""), "ok");
+      // замыкаем цикл: релиз даёт только папку, службу создаёт пресет
+      if (res.needs_preset) {
+        if (res.active_preset) {
+          await createService(res.active_preset);
+        } else {
+          toast("Теперь примените пресет — он создаст службу", "");
+        }
+      }
     } else {
       toast("Ошибка: " + ((res && res.error) || "неизвестно"), "err");
     }
