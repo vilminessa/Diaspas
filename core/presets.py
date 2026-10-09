@@ -198,7 +198,9 @@ def _merge_domains(path: Path, domains: tuple[str, ...]) -> None:
         return
     if existing and existing[-1].strip():
         existing.append("")
-    existing.append("# Diaspas")
+    # заголовок ставим один раз: повторные применения не плодят дубли
+    if not any(line.strip() == "# Diaspas" for line in existing):
+        existing.append("# Diaspas")
     existing.extend(missing)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\r\n".join(existing) + "\r\n", encoding="utf-8")
@@ -265,32 +267,52 @@ def _finish(preset: Preset, res: dict, log=None) -> dict:
         if log:
             log("error", err)
         return {"ok": False, "error": err, "preset": preset.key}
+    # Явный маркер активного пресета: три игровых пресета ведут себя
+    # одинаково (SAFE_EXCLUDE сделал их сигнатуры идентичными), и
+    # инференс по состоянию не может сказать, какой из них применили -
+    # подсветка всегда показывала первый по порядку.
+    _remember_active(preset.key)
     if log:
         log("info", f"пресет «{preset.title}» применён")
     return {"ok": True, "preset": preset.key,
             "state": res.get("state") or {}}
 
 
-def current_preset(root: Path | None, state: service.ServiceState,
-                   presets: list[Preset] | None = None) -> Preset | None:
-    """Какой пресет соответствует текущему состоянию (для подсветки)."""
-    if not state.installed and not state.running:
-        for preset in (presets or load_presets()):
-            if preset.off:
-                return preset
-        return None
-    if root is None or not state.strategy:
-        return None
+def _remember_active(key: str) -> None:
+    """Сохранить ключ активного пресета в настройки."""
+    from . import paths
+    settings = paths.read_settings()
+    settings["active_preset"] = key
+    paths.write_settings(settings)
+
+
+def active_preset_key() -> str | None:
+    """Ключ пресета, применённого через Diaspas (None - неизвестно)."""
+    from . import paths
+    key = paths.read_settings().get("active_preset")
+    return str(key) if key else None
+
+
+@dataclass(frozen=True)
+class _Snapshot:
+    """Что реально лежит в установке - всё, по чему сравниваются пресеты."""
+
+    strategy_file: str
+    game_filter: str
+    ipset: str
+    excludes: frozenset[str]
+
+
+def _snapshot(root: Path, state: service.ServiceState) -> _Snapshot:
+    """Снимок состояния установки: стратегия из метки реестра + файлы."""
     root_path = Path(root)
-    # Метка в реестре - имя без .bat (как пишет service.bat)
     from .paths import strategy_stem
+
     strategy_file = ""
     for name in _strategy_names(root):
         if strategy_stem(name) == state.strategy:
             strategy_file = name
             break
-    if not strategy_file:
-        return None
 
     gf_flag = root_path / "utils" / "game_filter.enabled"
     game_filter = ""
@@ -309,8 +331,8 @@ def current_preset(root: Path | None, state: service.ServiceState,
         else:
             ipset = "loaded"
 
-    exclude_file = root_path / "lists" / "list-exclude-user.txt"
     excludes: set[str] = set()
+    exclude_file = root_path / "lists" / "list-exclude-user.txt"
     if exclude_file.is_file():
         for line in exclude_file.read_text(encoding="utf-8",
                                            errors="replace").splitlines():
@@ -318,27 +340,61 @@ def current_preset(root: Path | None, state: service.ServiceState,
             if line and not line.startswith("#"):
                 excludes.add(line.lower())
 
-    # Состояние может соответствовать нескольким пресетам (списки
-    # накапливаются: и ea.com, и ubisoft.com в исключениях). Выбираем
-    # того, чьи exclude_domains точнее всего покрыты - иначе подсветка
-    # показывала бы всегда первый по порядку пресет.
+    return _Snapshot(strategy_file=strategy_file, game_filter=game_filter,
+                     ipset=ipset, excludes=frozenset(excludes))
+
+
+def _matches(preset: Preset, snap: _Snapshot) -> bool:
+    """Сигнара пресета (то, что он обещает) содержится в снимке."""
+    if preset.off:
+        return False   # off проверяется отдельно - по факту службы
+    if preset.strategy != snap.strategy_file:
+        return False
+    wanted_gf = preset.game_filter if preset.game_filter in (
+        "all", "tcp", "udp") else ""
+    if wanted_gf != snap.game_filter:
+        return False
+    if preset.ipset and preset.ipset != snap.ipset:
+        return False
+    return all(d.lower() in snap.excludes for d in preset.exclude_domains)
+
+
+def current_preset(root: Path | None, state: service.ServiceState,
+                   presets: list[Preset] | None = None,
+                   active_key: str | None = None) -> Preset | None:
+    """Какой пресет соответствует текущему состоянию (для подсветки).
+
+    Порядок: сначала маркер ``active_preset`` (то, что реально
+    применяли) - но только если его ожидания всё ещё выполняются;
+    если состояние разошлось (правки через service.bat), маркер
+    игнорируется и работает прежний инференс по снимку.
+    """
+    if not state.installed and not state.running:
+        for preset in (presets or load_presets()):
+            if preset.off:
+                return preset
+        return None
+    if root is None or not state.strategy:
+        return None
+
+    all_presets = presets or load_presets()
+    snap = _snapshot(root, state)
+
+    # 1. маркер: применённый Diaspas'ом пресет, чьи ожидания совпали
+    if active_key and active_key != "off":
+        marked = next((p for p in all_presets if p.key == active_key), None)
+        if marked is not None and _matches(marked, snap):
+            return marked
+
+    # 2. инференс: состояние может соответствовать нескольким пресетам
+    # (списки накапливаются), поэтому выбираем точность покрытия
     best: Preset | None = None
     best_score = -1
-    for preset in (presets or load_presets()):
-        if preset.off:
-            continue
-        if preset.strategy != strategy_file:
-            continue
-        wanted_gf = preset.game_filter if preset.game_filter in (
-            "all", "tcp", "udp") else ""
-        if wanted_gf != game_filter:
-            continue
-        if preset.ipset and preset.ipset != ipset:
-            continue
-        if any(d.lower() not in excludes for d in preset.exclude_domains):
+    for preset in all_presets:
+        if not _matches(preset, snap):
             continue
         score = sum(1 for d in preset.exclude_domains
-                    if d.lower() in excludes)
+                    if d.lower() in snap.excludes)
         if score > best_score:
             best, best_score = preset, score
     return best

@@ -101,7 +101,9 @@ class App:
         current = None
         if self.zapret_root is not None:
             try:
-                current = presets_mod.current_preset(self.zapret_root, st)
+                current = presets_mod.current_preset(
+                    self.zapret_root, st,
+                    active_key=presets_mod.active_preset_key())
             except Exception:  # noqa: BLE001 - распознавание не валит статус
                 self.log("exception", "распознавание пресета")
                 current = None

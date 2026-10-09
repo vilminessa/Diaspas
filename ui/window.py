@@ -223,7 +223,8 @@ class App(tk.Tk):
         current = None
         if root is not None:
             try:
-                current = presets_mod.current_preset(root, state)
+                current = presets_mod.current_preset(
+                    root, state, active_key=presets_mod.active_preset_key())
             except Exception:  # noqa: BLE001 - распознавание не должно валить статус
                 current = None
         self._q.put(("state", {"state": state, "root": root,
