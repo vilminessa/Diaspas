@@ -33,6 +33,10 @@ def make_app(tmp_path, monkeypatch, installed=True, root=DIR):
                               strategy="general (ALT11)" if installed else "",
                               pid=1234 if installed else 0, binpath="")
     monkeypatch.setattr(service, "state", lambda log=None: st)
+    # install_release останавливает службу перед заменой папки - в тесте
+    # это не должно трогать реальную службу машины
+    monkeypatch.setattr(service, "stop",
+                        lambda log=None: {"ok": True})
     app = App()
     app.zapret_root = root
     return app, st

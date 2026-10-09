@@ -134,10 +134,16 @@ def zapret_dir_from_settings() -> Path | None:
 def zapret_dir_info() -> tuple[Path | None, str]:
     """(папка, откуда взялась) - для честного отображения в UI.
 
-    Автопоиск молча подставлял старую установку вместо «скачанной» -
-    пользователь не понимал, к какой папке применяется пресет.
-    Источник: settings (записана Diaspas) | autodiscover | None.
+    Приоритет: реестр установленных версий (активная версия) -> настройки
+    (наследие одноверсионности) -> автопоиск. Автопоиск молча подставлял
+    старую установку вместо «скачанной» - теперь источник виден.
     """
+    # реестр версий: активная записана явно (см. core.installs)
+    from . import installs
+    active = installs.active_path()
+    if active is not None:
+        return active, "settings"
+
     configured = str(read_settings().get("zapret_dir") or "").strip()
     if configured:
         path = Path(configured)

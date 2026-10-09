@@ -50,6 +50,21 @@
             <dt>Пресет</dt><dd id="v-preset">—</dd>
             <dt>Процесс winws</dt><dd id="v-pid" class="mono">—</dd>
           </dl>
+
+          <!-- версии zapret: несколько установленных, одна активная -->
+          <div class="version-row">
+            <label class="field">версия
+              <select id="version-select"></select>
+            </label>
+            <button id="btn-switch-version" class="btn hidden">Переключить</button>
+            <button id="btn-rollback" class="btn hidden">Откатиться</button>
+            <button id="btn-remove-version" class="btn danger hidden">Удалить выбранную</button>
+          </div>
+          <div class="btn-row">
+            <button id="btn-check-update" class="btn">Проверить обновление</button>
+            <button id="btn-check-install" class="btn">Проверить файлы</button>
+          </div>
+
           <div class="btn-row">
             <button id="btn-refresh" class="btn">Обновить</button>
             <button id="btn-pick-dir" class="btn">Указать папку…</button>

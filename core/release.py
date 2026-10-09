@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -151,33 +152,34 @@ def _cleanup(part: Path) -> None:
 
 
 def install(zip_path: Path, dest: Path, progress=None) -> Path:
-    """Распаковать релиз в dest (с заменой), вернуть папку zapret внутри.
+    """Распаковать релиз в dest (с заменой СВОЕЙ версии), вернуть папку.
 
-    Архив Flowseal распаковывается в подпапку с именем версии; если её нет
-    (изменилась структура релиза), содержимое кладётся в dest напрямую.
+    Соседние версии не трогаются: рядом могут жить 1.9.x и 1.10.x -
+    хранение нескольких версий для переключения и отката. Распаковка
+    идёт во временную staging-папку; в dest переезжает только готовый
+    результат, а старая копия ТОЖ ЭТОЙ версии удаляется первой.
 
     Каждый шаг обёрнут в ReleaseError с указанием, где встало: пустая папка
     после сбоя - ровно та проблема, что ловили на живой системе.
     """
     dest = Path(dest)
-    try:
-        if dest.exists():
-            shutil.rmtree(dest, ignore_errors=True)
-        dest.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise ReleaseError(
-            f"не удалось подготовить папку {dest}: {exc}") from exc
+    dest.mkdir(parents=True, exist_ok=True)
+    staging = dest / f".staging-{int(time.time())}"
 
     try:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(zip_path) as zf:
             # у ZipInfo атрибут file_size, а не size - поиск несуществующего
             # поля ронял установку ДО распаковки и оставлял пустую папку
             members = zf.infolist()
             total = sum(m.file_size for m in members) or None
-            zf.extractall(dest)
+            zf.extractall(staging)
             if progress and total:
                 progress(total, total)
     except zipfile.BadZipFile as exc:
+        shutil.rmtree(staging, ignore_errors=True)
         # битый кэш убираем: иначе следующая попытка возьмёт его же
         try:
             Path(zip_path).unlink(missing_ok=True)
@@ -187,19 +189,44 @@ def install(zip_path: Path, dest: Path, progress=None) -> Path:
             "архив повреждён и удалён из кэша - повторите скачивание"
         ) from exc
     except OSError as exc:
+        shutil.rmtree(staging, ignore_errors=True)
         raise ReleaseError(
             "распаковка не удалась (антивирус может блокировать запись "
             f"WinDivert): {exc}") from exc
 
     # Найти распакованную папку: если zip содержал единственный каталог - он и есть.
-    entries = [p for p in dest.iterdir() if p.is_dir()]
+    entries = [p for p in staging.iterdir() if p.is_dir()]
     root = entries[0] if len(entries) == 1 and not any(
-        dest.glob("*.bat")) else dest
+        staging.glob("*.bat")) else staging
 
     if not (root / "service.bat").is_file():
+        shutil.rmtree(staging, ignore_errors=True)
         raise ReleaseError("в распакованном релизе нет service.bat")
     _ensure_license(root)
-    return root
+
+    # готово: переезд в dest/<имя версии>; старая копия этой же версии
+    # удаляется, чужие версии не трогаются
+    final = dest / root.name
+    if root.resolve() == final.resolve():
+        # flat-архив (без верхней папки): распакованное уже на месте
+        return final
+    if final.exists():
+        shutil.rmtree(final, ignore_errors=True)
+        if final.exists():
+            # папка занята: чаще всего работающий winws держит свой exe -
+            # вызывающий должен остановить службу ДО установки
+            raise ReleaseError(
+                f"папка {final.name} занята и не удаляется - "
+                f"остановите службу zapret и повторите")
+    try:
+        root.rename(final)
+    except OSError as exc:
+        raise ReleaseError(
+            f"не удалось заменить папку {final.name}: {exc}") from exc
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+    return final
 
 
 def _ensure_license(root: Path) -> None:

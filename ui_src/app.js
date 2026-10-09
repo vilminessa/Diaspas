@@ -31,6 +31,7 @@ const S = {
   state: null,
   presets: [],
   probes: null,      // последний отчёт пробы
+  versions: null,    // реестр установленных версий zapret
   busy: false,
   logs: [],          // строки журнала (объекты {ts, level, text})
   logFilter: "all",
@@ -153,6 +154,222 @@ async function createService(key) {
   if (!okBox) return;
   // confirmed=true: вопрос уже задан - applyPreset не должен спрашивать снова
   await applyPreset(p, true);
+}
+
+/* ── версии zapret: несколько установленных, одна активная ─────────── */
+
+async function refreshVersions() {
+  try {
+    const v = await api().versions();
+    renderVersions(v);
+    return v;
+  } catch (e) {
+    toast("Ошибка: " + e, "err");
+    return null;
+  }
+}
+
+function renderVersions(v) {
+  S.versions = v;
+  const sel = $("#version-select");
+  sel.innerHTML = "";
+  if (!v.items || !v.items.length) {
+    const opt = document.createElement("option");
+    opt.textContent = "нет установленных версий";
+    opt.value = "";
+    sel.appendChild(opt);
+  } else {
+    v.items.forEach((it) => {
+      const opt = document.createElement("option");
+      opt.value = it.path;
+      const mark = it.path === v.active ? "● активная" : "";
+      const broken = it.valid ? "" : " (повреждена)";
+      opt.textContent = `${it.version}${mark ? " — " + mark : ""}${broken}`;
+      opt.disabled = !it.valid;
+      sel.appendChild(opt);
+    });
+    sel.value = v.active || (v.items[0] && v.items[0].path) || "";
+  }
+
+  // кнопки видны, только когда есть что делать
+  const selected = sel.value;
+  $("#btn-switch-version").classList.toggle(
+    "hidden", !(selected && selected !== v.active));
+  $("#btn-rollback").classList.toggle("hidden", !v.rollback);
+  $("#btn-remove-version").classList.toggle(
+    "hidden", !(selected && selected !== v.active));
+
+  if (v.best_strategy) {
+    $("#statusbar-last").textContent =
+      `для этой версии подобрана стратегия: ${labelOf(v.best_strategy)}`;
+  }
+}
+
+async function switchVersion() {
+  const sel = $("#version-select");
+  const path = sel.value;
+  if (!path || !S.versions || path === S.versions.active) return;
+  const name = path.split("\\").pop() || path;
+  const okBox = await confirmBox("Переключение версии",
+    `Активной станет версия «${name}».\n` +
+    `Служба zapret будет переустановлена на её папку с текущим пресетом.\n` +
+    `Прежняя версия сохранится для отката.\n\nПродолжить?`);
+  if (!okBox) return;
+  setBusy(true, `переключение на ${name}…`);
+  try {
+    const res = await api().switch_version(path);
+    if (res && res.ok) {
+      toast(`Активная версия: ${name}`, "ok");
+    } else {
+      toast("Ошибка: " + ((res && res.error) || "неизвестно"), "err");
+    }
+  } catch (e) {
+    toast("Ошибка: " + e, "err");
+  } finally {
+    setBusy(false, "готов");
+    await refreshState();
+    await refreshVersions();
+  }
+}
+
+async function rollbackVersion() {
+  if (!S.versions || !S.versions.rollback) return;
+  const name = S.versions.rollback.split("\\").pop();
+  const okBox = await confirmBox("Откат версии",
+    `Вернуться на «${name}»? Служба будет переустановлена на её папку.`);
+  if (!okBox) return;
+  setBusy(true, `откат на ${name}…`);
+  try {
+    const res = await api().rollback_version();
+    if (res && res.ok) toast(`Откат выполнен: ${name}`, "ok");
+    else toast("Ошибка: " + ((res && res.error) || "неизвестно"), "err");
+  } catch (e) {
+    toast("Ошибка: " + e, "err");
+  } finally {
+    setBusy(false, "готов");
+    await refreshState();
+    await refreshVersions();
+  }
+}
+
+async function removeVersion() {
+  const sel = $("#version-select");
+  const path = sel.value;
+  if (!path || !S.versions || path === S.versions.active) return;
+  const name = path.split("\\").pop() || path;
+  const okBox = await confirmBox("Удаление версии",
+    `Удалить «${name}» и её файлы с диска? Действие необратимо.`);
+  if (!okBox) return;
+  try {
+    const res = await api().remove_version(path);
+    if (res && res.ok) toast(`Версия ${name} удалена`, "ok");
+    else toast("Ошибка: " + ((res && res.error) || "неизвестно"), "err");
+  } catch (e) {
+    toast("Ошибка: " + e, "err");
+  }
+  await refreshVersions();
+}
+
+async function offerStale(stale) {
+  // версии сверх лимита после установки/обновления - предложить убрать
+  if (!stale || !stale.length) return;
+  const names = stale.map((s) => s.version).join(", ");
+  const okBox = await confirmBox("Очистка старых версий",
+    `Установлено версий больше лимита. Удалить старые: ${names}?\n` +
+    `Активная и откатная версии не удаляются.`);
+  if (!okBox) return;
+  for (const s of stale) {
+    const res = await api().remove_version(s.path);
+    if (!(res && res.ok)) {
+      toast("Ошибка: " + ((res && res.error) || "неизвестно"), "err");
+      break;
+    }
+  }
+  toast("Старые версии удалены", "ok");
+  await refreshVersions();
+}
+
+async function checkUpdate() {
+  setBusy(true, "проверяю обновления на GitHub…");
+  let res;
+  try {
+    res = await api().check_update();
+  } finally {
+    setBusy(false, "готов");
+  }
+  if (!res || !res.ok) {
+    toast("Ошибка: " + ((res && res.error) || "нет связи с GitHub"), "err");
+    return;
+  }
+  if (!res.update_available) {
+    toast(`Активная версия ${res.current || "?"} — актуальна`, "ok");
+    return;
+  }
+  await updateLatest(res.latest);
+}
+
+async function updateLatest(tag) {
+  const okBox = await confirmBox("Обновление zapret",
+    `Доступна версия ${tag}.\n\nНовая версия установится РЯДОМ со старой, ` +
+    `затем пресет применится к ней и обход будет проверен. ` +
+    `Если проверка не пройдёт — произойдёт автоматический откат.\n\n` +
+    `Обновить?`);
+  if (!okBox) return;
+  setBusy(true, `обновление до ${tag}…`);
+  try {
+    const res = await api().update_latest();
+    if (res && res.ok && res.up_to_date) {
+      toast("Уже актуальная версия", "ok");
+    } else if (res && res.ok) {
+      toast(`Обновлено до ${res.tag}: обход проверен`, "ok");
+      await offerStale(res.stale);
+    } else if (res && res.rolled_back) {
+      toast(`Обновление отменено: ${res.error || "обход сломался"} — ` +
+            `выполнено откат`, "err");
+    } else {
+      toast("Ошибка: " + ((res && res.error) || "неизвестно"), "err");
+    }
+  } catch (e) {
+    toast("Ошибка: " + e, "err");
+  } finally {
+    setBusy(false, "готов");
+    await refreshState();
+    await refreshVersions();
+  }
+}
+
+async function checkInstall() {
+  setBusy(true, "проверяю файлы установки…");
+  let res;
+  try {
+    res = await api().check_install();
+  } finally {
+    setBusy(false, "готов");
+  }
+  if (!res || !res.ok) {
+    toast("Ошибка: " + ((res && res.error) || "папка не найдена"), "err");
+    return;
+  }
+  if (!res.missing || !res.missing.length) {
+    toast(`Версия ${res.version} цела: все файлы на месте`, "ok");
+    return;
+  }
+  const list = res.missing.slice(0, 6).join(", ") +
+               (res.missing.length > 6 ? `… (+${res.missing.length - 6})` : "");
+  const okBox = await confirmBox("Повреждённая установка",
+    `Отсутствуют файлы (${res.missing.length}):\n${list}\n\n` +
+    `Восстановить из архива этой же версии из кэша?`);
+  if (!okBox) return;
+  setBusy(true, "восстанавливаю файлы…");
+  try {
+    const r2 = await api().repair_install();
+    if (r2 && r2.ok) toast(`Восстановлено файлов: ${r2.restored}`, "ok");
+    else toast("Ошибка: " + ((r2 && r2.error) || "архив не найден"), "err");
+  } catch (e) {
+    toast("Ошибка: " + e, "err");
+  } finally {
+    setBusy(false, "готов");
+  }
 }
 
 async function refreshState() {
@@ -417,6 +634,7 @@ async function installRelease() {
           toast("Теперь примените пресет — он создаст службу", "");
         }
       }
+      await offerStale(res.stale);
     } else {
       toast("Ошибка: " + ((res && res.error) || "неизвестно"), "err");
     }
@@ -425,6 +643,7 @@ async function installRelease() {
   } finally {
     setBusy(false, "готов");
     await refreshState();
+    await refreshVersions();
   }
 }
 
@@ -462,6 +681,22 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#btn-ab").onclick = runAb;
   $("#btn-select").onclick = runSelect;
   $("#btn-select-cancel").onclick = () => api().select_cancel();
+  // версии zapret
+  $("#btn-switch-version").onclick = switchVersion;
+  $("#btn-rollback").onclick = rollbackVersion;
+  $("#btn-remove-version").onclick = removeVersion;
+  $("#btn-check-update").onclick = checkUpdate;
+  $("#btn-check-install").onclick = checkInstall;
+  $("#version-select").onchange = () => {
+    // кнопки зависят от выбора: переключить/удалить - только неактивную
+    const sel = $("#version-select");
+    const act = S.versions && S.versions.active;
+    const chosen = sel.value;
+    $("#btn-switch-version").classList.toggle(
+      "hidden", !chosen || chosen === act);
+    $("#btn-remove-version").classList.toggle(
+      "hidden", !chosen || chosen === act);
+  };
   $("#log-filter").onchange = (e) => { S.logFilter = e.target.value; renderLog(); };
   $("#btn-log-copy").onclick = async () => {
     const text = S.logs.map((l) => l.raw || l.text).join("\n");
@@ -496,6 +731,7 @@ async function init() {
     (lines || []).forEach(appendLog);
     renderPresets(await api().presets());
     await refreshState();
+    await refreshVersions();
     $("#statusbar-text").textContent = "готов";
     await warmupPrivileges();
   } catch (e) {

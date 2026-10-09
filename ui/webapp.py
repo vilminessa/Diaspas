@@ -24,7 +24,8 @@ from pathlib import Path
 
 import webview
 
-from core import abtest, autoselect, log as dlog, paths, presets as presets_mod
+from core import abtest, autoselect, installs, log as dlog, paths
+from core import presets as presets_mod
 from core import probes, release, service
 from i18n import tr
 from ui.bundle import INDEX_HTML
@@ -186,6 +187,242 @@ class App:
             for p in presets_mod.load_presets()
         ]
 
+    # -- версии zapret ----------------------------------------------------
+
+    def versions(self) -> dict:
+        """Реестр установленных версий для селектора в UI.
+
+        Помимо списка - готовые подсказки: что доступно к откату, что
+        предложить к удалению сверх лимита, и не отстала ли активная
+        версия от последнего релиза (без сети - только по кэшу релиза).
+        """
+        installs.ensure_registry()
+        active = installs.active_path()
+        keep = int(installs.load().get("keep_versions")
+                   or installs.DEFAULT_KEEP)
+        stale = installs.prune()
+        settings = paths.read_settings()
+        return {
+            "items": [
+                {"path": str(i.path), "version": i.version,
+                 "source": i.source, "last_used": i.last_used,
+                 "active": str(i.path) == str(active),
+                 "valid": installs.is_valid(i.path)}
+                for i in installs.items()
+            ],
+            "active": str(active) if active else None,
+            "rollback": str(installs.rollback_path() or ""),
+            "keep": keep,
+            "stale": [{"path": s.path, "version": s.version}
+                      for s in stale],
+            # лучшая стратегия этой установки - не подмешивать чужой
+            "best_strategy": (autoselect.load_best(str(active))
+                              if active else None),
+            "release_note": settings.get("zapret_release") or "",
+        }
+
+    def switch_version(self, path: str) -> dict:
+        """Переключиться на другую установленную версию.
+
+        Переключение = активная папка меняется и служба переустанавливается
+        на неё с текущим пресетом: списки живут внутри папки версии, ничего
+        чужого не подмешивается.
+        """
+        path = str(Path(path))
+        if not installs.is_valid(path):
+            return {"ok": False,
+                    "error": f"папка недоступна или повреждена: {path}"}
+        current = installs.active_path()
+        if current is not None and str(current) == path:
+            return {"ok": True, "unchanged": True}
+
+        self.log("info", f"переключение версии: {Path(path).name}")
+        installs.set_active(path)
+        settings = paths.read_settings()
+        settings["zapret_dir"] = path
+        paths.write_settings(settings)
+        self.zapret_root = Path(path)
+        self.zapret_source = "settings"
+
+        # служба переустанавливается на новый путь текущим пресетом
+        key = presets_mod.active_preset_key() or "discord_youtube"
+        res = presets_mod.apply(
+            next((p for p in presets_mod.load_presets() if p.key == key),
+                 None) or presets_mod.load_presets()[0],
+            self.zapret_root, log=self.log)
+        self.emitter.emit("state", self.state())
+        if not res.get("ok"):
+            return {"ok": False, "error": str(res.get("error")),
+                    "rolled_back": False}
+        return {"ok": True, "applied": key,
+                "rollback": str(installs.rollback_path() or "")}
+
+    def rollback_version(self) -> dict:
+        """Откатиться на предыдущую активную версию одним действием."""
+        target = installs.rollback_path()
+        if target is None:
+            return {"ok": False, "error": "откатывать некуда"}
+        self.log("info", f"откат на {target.name}")
+        res = self.switch_version(str(target))
+        if res.get("ok"):
+            self.log("info", f"откат выполнен: {target.name}")
+        return res
+
+    def remove_version(self, path: str) -> dict:
+        """Удалить неактивную версию; активную и откатную - нельзя."""
+        path = str(Path(path))
+        # служба может указывать на удаляемую папку при рассинхроне
+        # реестра (register переключает активную, но службу не трогает) -
+        # winws держит exe, и папка не удалится
+        if installs.service_points_to(path):
+            self.log("info", "служба указывает на удаляемую папку - "
+                             "останавливаю")
+            service.stop(log=self.log)
+        if not installs.remove(path):
+            return {"ok": False,
+                    "error": "не удалось удалить: папка активная, откатная "
+                             "или файлы заняты (остановите службу)"}
+        self.log("info", f"версия удалена: {Path(path).name}")
+        self.emitter.emit("versions", self.versions())
+        return {"ok": True}
+
+    # -- обновление и откат ------------------------------------------------
+
+    def check_update(self) -> dict:
+        """Есть ли релиз новее активной версии (сеть требуется)."""
+        active = installs.active_path()
+        current = installs.version_of(active) if active else None
+        try:
+            rel = release.latest_release()
+        except release.ReleaseError as exc:
+            return {"ok": False, "error": str(exc), "current": current}
+        return {"ok": True, "current": current, "latest": rel.tag,
+                "update_available": bool(current and rel.tag != current)}
+
+    def update_latest(self) -> dict:
+        """Обновление до последнего релиза с автопроверкой и откатом.
+
+        Новая версия ставится РЯДОМ (соседи не удаляются), пресет
+        применяется к ней, пробы решают судьбу: всё зелёное - остаёмся,
+        что-то красное - откатываемся на прежнюю версию одним шагом.
+        """
+        active = installs.active_path()
+        prev = str(active) if active else None
+        current = installs.version_of(active) if active else None
+
+        def progress(done: int, total: int | None) -> None:
+            if total:
+                self.emitter.emit("toast", {
+                    "text": f"{done * 100 // total}% "
+                            f"({done // 1024}/{total // 1024} КБ)"})
+
+        try:
+            rel = release.latest_release()
+        except release.ReleaseError as exc:
+            self.log("error", str(exc))
+            return {"ok": False, "error": str(exc)}
+        if current == rel.tag:
+            return {"ok": True, "up_to_date": True, "tag": rel.tag}
+        self.log("info", f"обновление: {current} -> {rel.tag}")
+        # новая версия ставится рядом, но пресет применяется к ней через
+        # пересоздание службы - прежнюю (если она на этой же папке)
+        # останавливаем заранее, иначе exe заблокирован
+        if service.state().installed:
+            self.log("info", "остановка службы перед установкой")
+            service.stop(log=self.log)
+
+        try:
+            zip_path = release.download(rel, progress=progress)
+            root = release.install(zip_path, paths.app_dir() / "zapret",
+                                   progress=progress)
+            presets_mod.ensure_user_lists(root)
+        except release.ReleaseError as exc:
+            self.log("error", f"обновление: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+        settings = paths.read_settings()
+        settings["zapret_dir"] = str(root)
+        settings["zapret_release"] = rel.tag
+        paths.write_settings(settings)
+        installs.register(root, source="download")   # prev -> rollback
+        self.zapret_root = root
+        self.zapret_source = "settings"
+
+        key = presets_mod.active_preset_key() or "discord_youtube"
+        preset = next((p for p in presets_mod.load_presets()
+                       if p.key == key), None)
+        if preset is None:
+            preset = presets_mod.load_presets()[0]
+        res = presets_mod.apply(preset, root, log=self.log)
+        if not res.get("ok"):
+            self._rollback_after_update(prev)
+            return {"ok": False, "error": str(res.get("error")),
+                    "rolled_back": True, "tag": rel.tag}
+
+        # автопроверка: обновление не должно ломать обход
+        self.log("info", "обновление: проверяю обход на новой версии")
+        report = probes.probe_all(timeout=8.0)
+        self.emitter.emit("probes", report)
+        self.emitter.emit("state", self.state())
+        if report["state"] != "full":
+            failed = probes.failed_targets(report)
+            self.log("error",
+                     f"обновление {rel.tag} сломало обход: {failed}")
+            rolled = self._rollback_after_update(prev)
+            return {"ok": False, "rolled_back": bool(rolled),
+                    "tag": rel.tag, "failed": failed,
+                    "error": "новая версия не прошла проверку обхода"}
+        self.log("info", f"обновление {rel.tag}: обход проверен (11/11)")
+        return {"ok": True, "tag": rel.tag, "up_to_date": False,
+                "stale": [{"path": s.path, "version": s.version}
+                          for s in installs.prune()]}
+
+    def _rollback_after_update(self, prev: str | None) -> bool:
+        """Вернуть прежнюю версию после неудачного обновления."""
+        if not prev or not installs.is_valid(prev):
+            return False
+        self.log("warning", f"возврат на прежнюю версию: {Path(prev).name}")
+        try:
+            self.switch_version(prev)
+            return True
+        except Exception:  # noqa: BLE001
+            self.log("exception", "откат после обновления")
+            return False
+
+    # -- ремонт установки ------------------------------------------------
+
+    def check_install(self) -> dict:
+        """Целостность активной установки: winws.exe, файлы стратегий."""
+        root = self.zapret_root
+        if root is None:
+            return {"ok": False, "error": tr("err.no_dir")}
+        missing = installs.integrity(root)
+        return {"ok": True, "missing": missing,
+                "version": installs.version_of(root)}
+
+    def repair_install(self) -> dict:
+        """Восстановить недостающее из архива этой же версии (если есть)."""
+        root = self.zapret_root
+        if root is None:
+            return {"ok": False, "error": tr("err.no_dir")}
+        version = installs.version_of(root)
+        zip_path = paths.cache_dir() / f"zapret-{version}.zip"
+        if not zip_path.is_file():
+            # архив мог быть переименован другим тегом - ищем по версии
+            candidates = list(paths.cache_dir().glob(f"zapret-*{version}*.zip"))
+            zip_path = candidates[0] if candidates else zip_path
+        if not zip_path.is_file():
+            return {"ok": False,
+                    "error": f"архив {version} не найден в кэше - "
+                             f"скачайте релиз заново"}
+        try:
+            restored = installs.repair(root, zip_path)
+        except release.ReleaseError as exc:
+            self.log("error", str(exc))
+            return {"ok": False, "error": str(exc)}
+        self.log("info", f"ремонт {version}: восстановлено файлов {restored}")
+        return {"ok": True, "restored": restored}
+
     # -- операции ------------------------------------------------------
 
     def apply_preset(self, key: str) -> dict:
@@ -269,6 +506,11 @@ class App:
         try:
             rel = release.latest_release()
             self.log("info", f"релиз {rel.tag} ({rel.published})")
+            # переустановка своей версии: работающий winws держит exe и
+            # не даёт заменить папку - служба останавливается заранее
+            if service.state().installed:
+                self.log("info", "остановка службы перед установкой")
+                service.stop(log=self.log)
             zip_path = release.download(rel, progress=progress)
             dest = paths.app_dir() / "zapret"
             root = release.install(zip_path, dest, progress=progress)
@@ -282,6 +524,9 @@ class App:
             paths.write_settings(settings)
             self.zapret_root = root
             self.zapret_source = "settings"
+            # версия попадает в реестр и становится активной; прежняя
+            # активная сохраняется как точка отката
+            installs.register(root, source="download")
             self.log("info", f"установлено: {root} (релиз {rel.tag})")
             self.emitter.emit("state", self.state())
             # Релиз установлен, но служба создаётся только пресетом:
@@ -290,7 +535,10 @@ class App:
             st = service.state()
             needs_preset = not st.installed
             result = {"ok": True, "tag": rel.tag, "path": str(root),
-                      "needs_preset": needs_preset}
+                      "needs_preset": needs_preset,
+                      # версии сверх лимита - фронт предложит удалить
+                      "stale": [{"path": s.path, "version": s.version}
+                                for s in installs.prune()]}
             if needs_preset:
                 key = presets_mod.active_preset_key() or "discord_youtube"
                 result["active_preset"] = key
@@ -326,6 +574,8 @@ class App:
             paths.write_settings(settings)
             self.zapret_root = path
             self.zapret_source = "settings"
+            # ручная папка тоже попадает в реестр версий
+            installs.register(path, source="manual")
             self.log("info", f"папка zapret: {path}")
             self.emitter.emit("state", self.state())
             return {"ok": True, "path": str(path)}
@@ -376,6 +626,14 @@ def run() -> int:
     api.prepare_privileges = guard(app.prepare_privileges)
     api.register_task_now = guard(app.register_task_now)
     api.state = guard(app.state)
+    api.versions = guard(app.versions)
+    api.switch_version = guard(app.switch_version)
+    api.rollback_version = guard(app.rollback_version)
+    api.remove_version = guard(app.remove_version)
+    api.check_update = guard(app.check_update)
+    api.update_latest = guard(app.update_latest)
+    api.check_install = guard(app.check_install)
+    api.repair_install = guard(app.repair_install)
     api.presets = guard(app.presets)
     api.apply_preset = guard(app.apply_preset)
     api.probes_run = guard(app.probes_run)

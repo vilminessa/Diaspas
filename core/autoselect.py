@@ -18,7 +18,7 @@ import json
 import time
 from pathlib import Path
 
-from . import service
+from . import paths, service
 # -- помощник (PowerShell) -------------------------------------------------
 # Тот же контракт, что у service_runner: request.json -> result-<token>.json,
 # промежуточные итоги - progress-<token>.json.
@@ -182,6 +182,52 @@ def _work_dir() -> Path:
     return d
 
 
+def _best_cache_path() -> Path:
+    """{app}/strategy-cache.json: лучшая стратегия ПО УСТАНОВКЕ.
+
+    Приём Synfronia: версии zapret живут по-своему (1.9.x и 1.10.x
+    различаются набором стратегий), поэтому выбор, сделанный для 1.10.3,
+    нельзя подмешивать 1.10.2 - ключ кэша путь установки.
+    """
+    return paths.app_dir() / "strategy-cache.json"
+
+
+def load_best(install: str) -> str | None:
+    """Лучшая стратегия, подобранная для этой установки ранее."""
+    try:
+        data = json.loads(_best_cache_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    entry = data.get(str(install))
+    if isinstance(entry, dict):
+        name = entry.get("strategy")
+        return str(name) if name else None
+    return None
+
+
+def save_best(install: str, strategy: str) -> None:
+    """Запомнить лучшую стратегию для установки (не для всех сразу)."""
+    path = _best_cache_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data[str(install)] = {"strategy": str(strategy),
+                          "checked": int(time.time())}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
 def _write_selector() -> Path:
     path = _work_dir() / "selector.ps1"
     try:
@@ -310,8 +356,13 @@ def run(root, strategies: list[str] | None = None, log=None,
     # STOPPED. Запоминаем состояние, чтобы не оставить ПК без обхода.
     was_running = service.state().running
 
-    return _wait_result(work, token, wait, log=log, on_progress=on_progress,
-                        restore=was_running)
+    data = _wait_result(work, token, wait, log=log,
+                        on_progress=on_progress, restore=was_running)
+    # лучшая стратегия запоминается для ЭТОЙ установки: при переключении
+    # версии подбор не подмешает чужой результат
+    if data and data.get("ok") and data.get("best"):
+        save_best(str(root), str(data["best"]))
+    return data
 
 
 def cancel() -> None:
