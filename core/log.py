@@ -53,6 +53,12 @@ def _rotate_if_needed(path: Path) -> None:
         pass  # ротация не должна ронять запись
 
 
+def format_line(level: str, text: str) -> str:
+    """Строка журнала с меткой времени - один источник и для файла, и для окна."""
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    return f"{stamp} [{level}] {text}"
+
+
 def write(level: str, text: str) -> None:
     """Одна строка журнала: [YYYY-MM-DD HH:MM:SS] [level] text.
 
@@ -61,8 +67,7 @@ def write(level: str, text: str) -> None:
     в кракозябры.
     """
     path = _ensure_dir()
-    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    line = f"{stamp} [{level}] {text}\n"
+    line = format_line(level, text) + "\n"
     with _lock:
         _rotate_if_needed(path)
         try:

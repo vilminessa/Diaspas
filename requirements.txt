@@ -1,8 +1,10 @@
 # Diaspas runs on Python 3.11+ and uses the standard library at runtime
-# (Tkinter, urllib, ctypes). PyInstaller is build-time only.
+# (Tkinter fallback, urllib, ctypes). PyInstaller is build-time only.
 #
+# pywebview - основной GUI (WebView2/EdgeChromium, как в Synfronia).
 # pytest и pyflakes используются CI (.github/workflows) и локальными
 # прогонами `python -m pytest tests/`.
+pywebview>=6.2
 pyinstaller>=6.0
 pytest>=8.0
 pyflakes>=3.0

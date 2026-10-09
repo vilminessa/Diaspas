@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diaspas</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<!-- ═══ шапка ═══ -->
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">◆</span>
+    <span class="brand-name">Diaspas</span>
+    <span class="brand-sub">διάσπασις</span>
+  </div>
+  <div class="topbar-right">
+    <span id="zapret-path" class="path" title=""></span>
+    <span id="top-status" class="status-pill status-unknown">
+      <span class="dot"></span><span class="status-text">…</span>
+    </span>
+  </div>
+</header>
+
+<!-- ═══ вкладки ═══ -->
+<nav class="tabs" role="tablist">
+  <button class="tab active" data-tab="overview" role="tab">Обзор</button>
+  <button class="tab" data-tab="diagnostics" role="tab">Диагностика</button>
+  <button class="tab" data-tab="journal" role="tab">Журнал</button>
+</nav>
+
+<main class="content">
+
+  <!-- ═══ вкладка: обзор ═══ -->
+  <section id="tab-overview" class="panel active">
+    <div class="grid-2">
+      <div class="col">
+        <div class="card">
+          <div class="card-title">Состояние</div>
+          <div class="hero">
+            <span id="state-dot" class="big-dot unknown"></span>
+            <div>
+              <div id="state-headline" class="hero-text">проверяю…</div>
+              <div id="state-sub" class="hero-sub muted"></div>
+            </div>
+          </div>
+          <dl class="kv">
+            <dt>Служба</dt><dd id="v-service">—</dd>
+            <dt>Стратегия</dt><dd id="v-strategy">—</dd>
+            <dt>Пресет</dt><dd id="v-preset">—</dd>
+            <dt>Процесс winws</dt><dd id="v-pid" class="mono">—</dd>
+          </dl>
+          <div class="btn-row">
+            <button id="btn-refresh" class="btn">Обновить</button>
+            <button id="btn-pick-dir" class="btn">Указать папку…</button>
+            <button id="btn-install" class="btn primary">Скачать последний релиз</button>
+          </div>
+          <div id="release-note" class="note muted"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Последние пробы</div>
+          <div id="overview-probes" class="chips">—</div>
+          <div class="btn-row">
+            <button id="btn-quick-probe" class="btn">Проверить</button>
+            <button class="btn" data-goto="diagnostics">Диагностика →</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="card">
+          <div class="card-title">Пресеты</div>
+          <div id="preset-grid" class="preset-grid"></div>
+          <div id="preset-hint" class="note muted">Наведите на пресет — появится описание.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ вкладка: диагностика ═══ -->
+  <section id="tab-diagnostics" class="panel">
+    <div class="card">
+      <div class="card-title">Пробы целевых сервисов</div>
+      <div id="probe-chips" class="chips">—</div>
+      <div class="btn-row">
+        <button id="btn-probe" class="btn primary">Проверить всё</button>
+      </div>
+      <div class="table-wrap">
+        <table class="table" id="probe-table">
+          <thead><tr><th>Группа</th><th>Цель</th><th>Результат</th><th>мс</th><th>Причина</th></tr></thead>
+          <tbody><tr><td colspan="5" class="muted">нет данных — нажмите «Проверить всё»</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">A/B-тест</div>
+      <p class="note muted">Служба будет остановлена и запущена заново: сравнение
+        «с обходом» и «без обхода» отделяет поломку zapret от блокировки DPI.</p>
+      <div class="btn-row">
+        <label class="field">группа
+          <select id="ab-group">
+            <option value="discord">discord</option>
+            <option value="youtube">youtube</option>
+            <option value="ea">ea</option>
+            <option value="ubisoft" selected>ubisoft</option>
+          </select>
+        </label>
+        <button id="btn-ab" class="btn primary">Запустить A/B</button>
+      </div>
+      <div id="ab-result" class="verdict hidden"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Автоподбор стратегий</div>
+      <div class="btn-row">
+        <button id="btn-select" class="btn primary">Перебрать стратегии</button>
+        <button id="btn-select-cancel" class="btn danger" disabled>Прервать</button>
+        <span id="select-progress" class="mono muted"></span>
+      </div>
+      <div class="progress"><div id="select-bar" class="progress-fill" style="width:0%"></div></div>
+      <div class="table-wrap">
+        <table class="table" id="select-table">
+          <thead><tr><th>Стратегия</th><th>Состояние</th><th>Счёт</th>
+            <th>discord</th><th>youtube</th><th>ea</th><th>ubisoft</th></tr></thead>
+          <tbody><tr><td colspan="7" class="muted">нет данных</td></tr></tbody>
+        </table>
+      </div>
+      <div id="select-best" class="note hidden"></div>
+    </div>
+  </section>
+
+  <!-- ═══ вкладка: журнал ═══ -->
+  <section id="tab-journal" class="panel">
+    <div class="card grow">
+      <div class="card-title row-between">
+        <span>Журнал</span>
+        <span class="btn-row">
+          <label class="field tiny">уровень
+            <select id="log-filter">
+              <option value="all">все</option>
+              <option value="info">info</option>
+              <option value="warning">warning</option>
+              <option value="error">error</option>
+            </select>
+          </label>
+          <button id="btn-log-copy" class="btn">Копировать</button>
+          <button id="btn-log-open" class="btn">Открыть файл</button>
+        </span>
+      </div>
+      <div id="log-view" class="log-view"></div>
+    </div>
+  </section>
+</main>
+
+<!-- ═══ статус-бар ═══ -->
+<footer class="statusbar">
+  <span id="busy-ind" class="hidden"><span class="spin"></span></span>
+  <span id="statusbar-text" class="muted">готов</span>
+  <span id="statusbar-last" class="mono muted right"></span>
+</footer>
+
+<!-- ═══ модал подтверждения ═══ -->
+<div id="modal" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-title" id="modal-title"></div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="btn-row right">
+      <button class="btn" id="modal-cancel">Отмена</button>
+      <button class="btn primary" id="modal-ok">ОК</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

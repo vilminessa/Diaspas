@@ -42,43 +42,52 @@ class Preset:
         return not self.strategy
 
 
+# Сервисы, которые A/B-тест доказал: работают и БЕЗ обхода (DPI их не
+# блокирует), а вот zapret их ломает (сброс TLS при десинке). Поэтому
+# эксклюзы этих доменов безопасны всегда и входят в каждый пресет: игрок
+# получает 11/11 независимо от выбора, не жертвуя ни EA, ни Ubisoft.
+SAFE_EXCLUDE: tuple[str, ...] = ("ea.com", "ubisoft.com", "ubi.com")
+
 DEFAULT_PRESETS: tuple[Preset, ...] = (
     Preset(
         key="discord_youtube",
         title="Discord / YouTube",
         strategy="general (ALT11).bat",
         game_filter="", ipset="",
-        exclude_domains=(),
+        exclude_domains=SAFE_EXCLUDE,
         general_domains=(),
-        description="Базовый обход для мессенджеров и видео. "
-                    "Игровые фильтры не трогает.",
+        description="Базовый обход для мессенджеров и видео. Игровые "
+                    "фильтры не трогает.",
     ),
     Preset(
         key="apex_ea",
         title="Apex / EA",
         strategy="general (ALT11).bat",
         game_filter="all", ipset="any",
-        exclude_domains=("ea.com",),
+        exclude_domains=SAFE_EXCLUDE,
         general_domains=(),
-        description="Авторизация EA вынесена в исключения: логин не "
-                    "блокируется ни DPI, ни обходом; игровые порты открыты.",
+        description="Игровые порты открыты; авторизация EA и Ubisoft "
+                    "в исключениях - работают без обхода (проверено "
+                    "A/B-тестом).",
     ),
     Preset(
         key="ubisoft",
         title="Ubisoft",
         strategy="general (ALT11).bat",
         game_filter="all", ipset="any",
-        exclude_domains=("ubisoft.com", "ubi.com"),
+        exclude_domains=SAFE_EXCLUDE,
         general_domains=(),
-        description="Аккаунт Ubisoft Connect в исключениях; IP-адреса "
-                    "216.98.x.x закрыты на уровне сети - обход их не открывает.",
+        description="Аккаунт Ubisoft Connect в исключениях вместе с EA: "
+                    "оба сервиса чисты и без zapret. IP 216.98.x.x "
+                    "закрыты на уровне сети - обход их не открывает.",
     ),
     Preset(
         key="games_max",
         title="Максимум для игр",
         strategy="general (ALT11).bat",
         game_filter="all", ipset="any",
-        exclude_domains=(), general_domains=(),
+        exclude_domains=SAFE_EXCLUDE,
+        general_domains=(),
         description="Игровые порты TCP и UDP открыты полностью: подбор "
                     "игроков и UDP-трафик идут через обход.",
     ),
@@ -116,6 +125,32 @@ def load_presets() -> list[Preset]:
 
 
 # -- запись состояния в установку zapret -----------------------------------
+
+def ensure_user_lists(root: Path) -> None:
+    """Гарантировать все 4 пользовательских файла списков - как
+    load_user_lists в service.bat.
+
+    Без них winws отказывается стартовать (обязательные hostlist-файлы
+    отсутствуют) и служба падает с WIN32_EXIT_CODE 1067. Файлы создаются
+    только если их нет: чужие правки не затираются.
+    """
+    root = Path(root)
+    lists = root / "lists"
+    lists.mkdir(parents=True, exist_ok=True)
+
+    defaults = {
+        # заглушка IP: TEST-NET-адрес, ни один реальный пакет не совпадёт
+        "ipset-exclude-user.txt": "203.0.113.113/32\r\n",
+        "list-general-user.txt": "# Never leave this file empty\r\n"
+                                 "domain.example.abc\r\n",
+        "list-exclude-user.txt": "# Never leave this file empty\r\n"
+                                 "domain.example.abc\r\n",
+    }
+    for name, content in defaults.items():
+        path = lists / name
+        if not path.is_file():
+            path.write_text(content, encoding="utf-8", newline="\n")
+
 
 def _write_flag(root: Path, game_filter: str) -> None:
     """Флаг Game Filter: содержимое - all/tcp/udp, отсутствие - выкл."""
@@ -171,6 +206,7 @@ def _merge_domains(path: Path, domains: tuple[str, ...]) -> None:
 
 def apply_files(root: Path, preset: Preset) -> None:
     """Всё, что можно сделать без прав: флаги, ipset, пользовательские списки."""
+    ensure_user_lists(root)   # до всего: без них winws не стартует
     if not preset.off:
         if preset.strategy and not (root / preset.strategy).is_file():
             raise FileNotFoundError(f"нет стратегии {preset.strategy}")
