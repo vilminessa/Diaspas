@@ -172,12 +172,23 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Скачать exe и провенанс из релиза
+      # exe берём из артефакта ЭТОГО рана, а не из релиза: при
+      # пересоздании тегов релизы «осиротевали» (untagged), publish и
+      # SLSA-генератор гонялись за состав ассетов, и verify падал с
+      # "no such file". Артефакт рана гарантирован и неизменяем.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: Diaspas-exe
+      - name: Скачать провенанс из релиза
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            -p Diaspas.exe -p Diaspas.exe.intoto.jsonl --clobber
+            -p Diaspas.exe.intoto.jsonl --clobber
+          # отчёт: что реально лежит в релизе (помогает при гонках)
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets[].name' || true
+          test -f Diaspas.exe.intoto.jsonl
       - name: gh attestation verify (bundle из релиза)
         env:
           GH_TOKEN: ${{ github.token }}
