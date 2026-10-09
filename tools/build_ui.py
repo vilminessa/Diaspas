@@ -74,6 +74,14 @@ def build() -> str:
 
 
 def main() -> int:
+    # stdout может быть cp1252 (CI на Windows без PYTHONUTF8): кириллица
+    # в print падала UnicodeEncodeError прямо на успешной проверке
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
     check = "--check" in sys.argv
     if not (SRC / "index.html").is_file():
         print("нет ui_src/index.html", file=sys.stderr)

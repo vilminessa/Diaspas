@@ -1,20 +1,24 @@
-"""Точечная правка workflows: бандл UI + расширенный pyflakes."""
+"""Точечная правка workflows: PYTHONUTF8 для всех шагов.
+
+Windows-раннер отдаёт stdout в cp1252; кириллица в print падает
+UnicodeEncodeError. PYTHONUTF8=1 переводит stdin/stdout/stderr в UTF-8
+на уровне Python - лечит build_ui, pytest и будущие инструменты разом.
+"""
 import pathlib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
-PYFLAKES_OLD = "run: python -m pyflakes core ui i18n.py main.py"
-PYFLAKES_NEW = "run: python -m pyflakes core ui tools i18n.py main.py"
-
-PYTEST_OLD = (
-    "      - name: Юнит-тесты (pytest)\n"
-    "        run: python -m pytest tests/ -q"
-)
-PYTEST_NEW = (
-    "      - name: Актуальность бандла UI (ui_src -> bundle.py)\n"
-    "        run: python tools/build_ui.py --check\n"
-    "      - name: Юнит-тесты (pytest)\n"
-    "        run: python -m pytest tests/ -q"
+ANCHOR = "permissions:\n  contents: read\n"
+PATCH = (
+    "permissions:\n"
+    "  contents: read\n"
+    "\n"
+    "# Windows-раннер печатает в cp1252; кириллица в выводе python\n"
+    "# (build_ui, pytest) падает UnicodeEncodeError. UTF-8 на уровне\n"
+    "# интерпретатора - единое решение для всех шагов.\n"
+    "env:\n"
+    '  PYTHONUTF8: "1"\n'
+    '  PYTHONIOENCODING: "utf-8"\n'
 )
 
 
@@ -22,13 +26,15 @@ def main() -> int:
     for name in ("release.yml", "beta.yml"):
         path = ROOT / ".github" / "workflows" / name
         text = path.read_text(encoding="utf-8")
-        if PYFLAKES_OLD not in text or PYTEST_OLD not in text:
-            print(f"{name}: шаблоны не найдены - пропущено (уже правлено?)")
+        if "PYTHONUTF8" in text:
+            print(f"{name}: уже содержит PYTHONUTF8")
             continue
-        text = text.replace(PYFLAKES_OLD, PYFLAKES_NEW)
-        text = text.replace(PYTEST_OLD, PYTEST_NEW)
+        if ANCHOR not in text:
+            print(f"{name}: якорь permissions не найден - пропущено")
+            continue
+        text = text.replace(ANCHOR, PATCH, 1)
         path.write_text(text, encoding="utf-8", newline="\n")
-        print(f"{name}: обновлён")
+        print(f"{name}: добавлен env PYTHONUTF8")
     return 0
 
 

@@ -15,6 +15,13 @@ on:
 permissions:
   contents: read
 
+# Windows-раннер печатает в cp1252; кириллица в выводе python
+# (build_ui, pytest) падает UnicodeEncodeError. UTF-8 на уровне
+# интерпретатора - единое решение для всех шагов.
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
 jobs:
   verify:
     name: проверки перед сборкой
