@@ -222,6 +222,9 @@
 <!-- ═══ статус-бар ═══ -->
 <footer class="statusbar">
   <span id="busy-ind" class="hidden"><span class="spin"></span></span>
+  <!-- долгая операция (закачка релиза) должна прерываться, а не «когда
+       закрыли окно» -->
+  <button id="btn-cancel-op" class="btn hidden">Отменить</button>
   <span id="statusbar-text" class="muted">готов</span>
   <span id="statusbar-last" class="mono muted right"></span>
 </footer>

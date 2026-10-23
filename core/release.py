@@ -24,7 +24,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from . import paths
+from . import oplock, paths
 
 REPO_FLOWSEAL = "Flowseal/zapret-discord-youtube"
 REPO_WINWS = "bol-van/zapret-win-bundle"
@@ -228,6 +228,9 @@ def download(release: Release, progress=None) -> Path:
                     done += len(chunk)
                     if progress:
                         progress(done, total)
+                    # долгая закачка должна прерываться по запросу, а не
+                    # «когда пользователь закрыл окно»
+                    oplock.check_cancel()
             if total is not None and done != total:
                 raise ReleaseError(
                     f"скачивание оборвано: получено {done} из {total} байт")
@@ -242,6 +245,9 @@ def download(release: Release, progress=None) -> Path:
         _cleanup(tmp)
         raise ReleaseError(f"обрыв скачивания: {exc.reason}") from exc
     except ReleaseError:
+        _cleanup(tmp)
+        raise
+    except oplock.Cancelled:
         _cleanup(tmp)
         raise
     except OSError as exc:

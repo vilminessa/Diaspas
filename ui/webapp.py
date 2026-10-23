@@ -27,7 +27,7 @@ import webview
 
 from dataclasses import replace
 
-from core import abtest, autoselect, installs, log as dlog, paths
+from core import abtest, autoselect, installs, log as dlog, oplock, paths
 from core import presets as presets_mod
 from core import probes, release, service, strategies as strategies_mod
 from i18n import tr
@@ -940,6 +940,12 @@ class App:
 
     # -- журнал --------------------------------------------------------
 
+    def cancel_operation(self) -> dict:
+        """Отменить текущую операцию (эффектно для долгих закачек)."""
+        asked = oplock.cancel()
+        self.log("info", f"запрос отмены: {oplock.current() or 'нет операции'}")
+        return {"ok": asked, "current": oplock.current()}
+
     def log_tail(self, n: int = 400) -> list[str]:
         return dlog.tail(int(n))
 
@@ -984,34 +990,61 @@ def run() -> int:
     # бы на позицию (log_tail получил бы 3 аргумента вместо 2). Атрибуты
     # инстанса не биндятся - вызов приходит ровно как из JS.
     api = type("Api", (), {})()
+
+    def op(name: str):
+        """Операция с установкой единолично (см. core.oplock).
+
+        pywebview зовёт api из пула потоков: «применить пресет» поверх
+        переключения версии или скачивания пересоздал бы службу в
+        середине чужой операции. Занятость - не исключение, а ответ с
+        понятной причиной, которую UI показывает тостом.
+        """
+        def deco(fn):
+            def wrapper(*args, **kwargs):
+                try:
+                    with oplock.operation(name):
+                        return fn(*args, **kwargs)
+                except oplock.BusyError as exc:
+                    app.log("warning", f"операция отклонена: {exc}")
+                    return {"ok": False, "error": str(exc), "busy": True}
+                except oplock.Cancelled:
+                    app.log("info", f"{name}: отменено")
+                    return {"ok": False, "error": tr("err.cancelled"),
+                            "cancelled": True}
+            wrapper.__name__ = fn.__name__
+            return wrapper
+        return deco
+
     api.hello = guard(app.hello)
     api.prepare_privileges = guard(app.prepare_privileges)
-    api.register_task_now = guard(app.register_task_now)
+    api.register_task_now = op("регистрация задачи")(guard(app.register_task_now))
     api.state = guard(app.state)
     api.strategies = guard(app.strategies)
     api.set_preset_strategy = guard(app.set_preset_strategy)
     api.strategy_detail = guard(app.strategy_detail)
-    api.try_strategy = guard(app.try_strategy)
     api.export_preset = guard(app.export_preset)
     api.import_preset = guard(app.import_preset)
     api.versions = guard(app.versions)
-    api.switch_version = guard(app.switch_version)
-    api.rollback_version = guard(app.rollback_version)
-    api.remove_version = guard(app.remove_version)
     api.check_update = guard(app.check_update)
-    api.update_latest = guard(app.update_latest)
     api.check_install = guard(app.check_install)
-    api.repair_install = guard(app.repair_install)
     api.presets = guard(app.presets)
-    api.apply_preset = guard(app.apply_preset)
     api.probes_run = guard(app.probes_run)
-    api.ab_run = guard(app.ab_run)
-    api.select_run = guard(app.select_run)
     api.select_cancel = guard(app.select_cancel)
-    api.install_release = guard(app.install_release)
-    api.pick_dir = guard(app.pick_dir)
+    api.cancel_operation = guard(app.cancel_operation)
     api.log_tail = guard(app.log_tail)
     api.open_log = guard(app.open_log)
+    api.pick_dir = guard(app.pick_dir)
+    # операции, которые трогают службу и установку: только по одной сразу
+    api.try_strategy = op("проба стратегии")(guard(app.try_strategy))
+    api.apply_preset = op("применение пресета")(guard(app.apply_preset))
+    api.switch_version = op("переключение версии")(guard(app.switch_version))
+    api.rollback_version = op("откат версии")(guard(app.rollback_version))
+    api.remove_version = op("удаление версии")(guard(app.remove_version))
+    api.update_latest = op("обновление zapret")(guard(app.update_latest))
+    api.repair_install = op("восстановление файлов")(guard(app.repair_install))
+    api.install_release = op("скачивание релиза")(guard(app.install_release))
+    api.ab_run = op("A/B-тест")(guard(app.ab_run))
+    api.select_run = op("перебор стратегий")(guard(app.select_run))
 
     win = webview.create_window(
         title="Diaspas (διάσπασις)",

@@ -87,10 +87,23 @@ function promptBox(title, body, value = "") {
 function setBusy(busy, label) {
   S.busy = busy;
   $("#busy-ind").classList.toggle("hidden", !busy);
+  // «Отменить» доступна пока операция идёт: отказ от долгой закачки -
+  // нормальное действие, а не ошибка
+  $("#btn-cancel-op").classList.toggle("hidden", !busy);
   if (label !== undefined) $("#statusbar-text").textContent = label;
   // блокировка действий: пока занято, кнопки не дёргают
   document.querySelectorAll(".tab, #preset-grid button, .card .btn, .card select")
     .forEach((b) => { b.disabled = busy; });
+}
+
+async function cancelOperation() {
+  try {
+    const res = await api().cancel_operation();
+    toast(res && res.ok ? "отмена запрошена — дождитесь точки остановки"
+                        : "сейчас нет операции, которую можно отменить", "");
+  } catch (e) {
+    toast("Ошибка отмены: " + e, "err");
+  }
 }
 
 /* ── вкладки ─────────────────────────────────────────────────── */
@@ -1175,6 +1188,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // кнопки
   $("#btn-refresh").onclick = refreshState;
+  $("#btn-cancel-op").onclick = cancelOperation;
   $("#btn-pick-dir").onclick = pickDir;
   $("#btn-install").onclick = installRelease;
   $("#btn-quick-probe").onclick = () => { switchTab("diagnostics"); runProbes(); };
