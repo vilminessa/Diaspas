@@ -158,6 +158,40 @@
       </div>
     </div>
 
+    <!-- история замеров: «было/стало» нужно и после закрытия окна, и
+         после смены стратегии в прошлый сеанс -->
+    <div class="card">
+      <div class="card-title row-between">
+        <span>История проб</span>
+        <button id="btn-history-refresh" class="btn">Обновить</button>
+      </div>
+      <div class="table-wrap">
+        <table class="table" id="history-table">
+          <thead><tr><th>Когда</th><th>Стратегия</th><th>Пресет</th>
+            <th>Результат</th><th>Δ к предыдущему</th></tr></thead>
+          <tbody><tr><td colspan="5" class="muted">нет замеров</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Свои цели пробы</div>
+      <p class="note muted">Стандартный список покрывает Discord, YouTube, EA и
+        Ubisoft. Здесь можно добавить то, что ломается у вас: свой сервис,
+        прокси, игру.</p>
+      <div id="user-groups" class="chips">—</div>
+      <div class="btn-row">
+        <label class="field">группа
+          <input id="pg-name" type="text" placeholder="например steam">
+        </label>
+        <label class="field">адрес
+          <input id="pg-url" type="text" placeholder="https://store.steampowered.com/">
+        </label>
+        <button id="btn-pg-add" class="btn">Добавить цель</button>
+        <button id="btn-pg-remove" class="btn danger">Удалить группу</button>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-title">A/B-тест</div>
       <p class="note muted">Служба будет остановлена и запущена заново: сравнение

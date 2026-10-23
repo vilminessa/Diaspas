@@ -27,7 +27,7 @@ import webview
 
 from dataclasses import replace
 
-from core import abtest, autoselect, installs, log as dlog, oplock, paths
+from core import abtest, autoselect, history, installs, log as dlog, oplock, paths
 from core import presets as presets_mod
 from core import probes, release, service, strategies as strategies_mod
 from i18n import tr
@@ -789,8 +789,76 @@ class App:
         self.last_probes = report
         line = probes.probe_line(report)
         self.log("info", f"пробы: {line}")
+        # замер в историю: «было/стало» нужно и после закрытия окна, и
+        # когда пользователь менял стратегию в прошлый сеанс
+        st = service.state()
+        history.append({
+            "state": report.get("state"), "count": report.get("count"),
+            "total": report.get("total"),
+            "preset": presets_mod.active_preset_key() or "",
+            "strategy": st.strategy or "",
+            "install": str(self.zapret_root or ""),
+            "groups": {name: {"state": rep.get("state"),
+                              "count": rep.get("count"),
+                              "total": rep.get("total")}
+                       for name, rep in (report.get("groups") or {}).items()},
+        })
         self.emitter.emit("probes", report)
         return report
+
+    def probe_history(self, n: int = 12) -> dict:
+        """Последние замеры: история проб с привязкой к пресету и стратегии."""
+        try:
+            limit = max(1, min(int(n or 12), history.LIMIT))
+        except (TypeError, ValueError):
+            limit = 12
+        return {"ok": True, "items": history.tail(limit),
+                "total": len(history.tail(history.LIMIT))}
+
+    def probe_groups_add(self, name: str, url: str) -> dict:
+        """Добавить цель в пользовательскую группу пробы."""
+        name = (name or "").strip()
+        url = (url or "").strip()
+        if not name:
+            return {"ok": False, "error": "нужно имя группы"}
+        if not (url.startswith("http://") or url.startswith("https://")):
+            return {"ok": False, "error": "адрес должен начинаться с http:// или https://"}
+        settings = paths.read_settings()
+        groups = settings.get("probe_groups") or {}
+        if not isinstance(groups, dict):
+            groups = {}
+        items = groups.get(name) or []
+        if not isinstance(items, list):
+            items = []
+        if any((isinstance(i, dict) and i.get("url") == url) or
+               (isinstance(i, (list, tuple)) and len(i) == 2 and i[1] == url)
+               for i in items):
+            return {"ok": False, "error": "такая цель уже есть"}
+        label = url.split("/")[2] if "//" in url else url
+        items.append({"name": label, "url": url})
+        groups[name] = items
+        settings["probe_groups"] = groups
+        paths.write_settings(settings)
+        self.log("info", f"пробы: группа {name!r} += {url}")
+        return {"ok": True, "group": name, "items": items}
+
+    def probe_groups_remove(self, name: str) -> dict:
+        settings = paths.read_settings()
+        groups = settings.get("probe_groups") or {}
+        if not isinstance(groups, dict) or name not in groups:
+            return {"ok": False, "error": f"группы {name!r} нет в пользовательских"}
+        groups.pop(name, None)
+        settings["probe_groups"] = groups
+        paths.write_settings(settings)
+        self.log("info", f"пробы: группа {name!r} удалена")
+        return {"ok": True}
+
+    def probe_groups(self) -> dict:
+        """Доступные группы пробы: встроенные и пользовательские."""
+        user = probes.user_groups()
+        return {"ok": True,
+                "builtin": list(probes.PROBE_GROUPS),
+                "user": {name: list(targets) for name, targets in user.items()}}
 
     def ab_run(self, group: str) -> dict:
         self.log("info", f"A/B-тест группы {group!r}")
@@ -1042,6 +1110,10 @@ def run() -> int:
     api.check_install = guard(app.check_install)
     api.presets = guard(app.presets)
     api.probes_run = guard(app.probes_run)
+    api.probe_history = guard(app.probe_history)
+    api.probe_groups = guard(app.probe_groups)
+    api.probe_groups_add = guard(app.probe_groups_add)
+    api.probe_groups_remove = guard(app.probe_groups_remove)
     api.select_cancel = guard(app.select_cancel)
     api.cancel_operation = guard(app.cancel_operation)
     api.log_tail = guard(app.log_tail)

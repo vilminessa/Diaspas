@@ -968,6 +968,101 @@ async function runProbes() {
     toast("Ошибка проб: " + e, "err");
   } finally {
     setBusy(false, "готов");
+    await refreshHistory();
+  }
+}
+
+/* ── история замеров ───────────────────────────────────────────────── */
+function fmtTs(ts) {
+  if (!ts) return "—";
+  const d = new Date(ts * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+async function refreshHistory() {
+  try {
+    const res = await api().probe_history(15);
+    renderHistory((res && res.items) || []);
+  } catch (e) {
+    toast("История недоступна: " + e, "err");
+  }
+}
+
+function renderHistory(items) {
+  const body = $("#history-table tbody");
+  if (!items.length) {
+    body.innerHTML = "<tr><td colspan='5' class='muted'>нет замеров</td></tr>";
+    return;
+  }
+  const rows = items.map((it, i) => {
+    const prev = items[i - 1];
+    let delta = "";
+    if (prev && prev.total) {
+      const d = (it.count || 0) - (prev.count || 0);
+      delta = d > 0 ? `+${d}` : (d < 0 ? `${d}` : "0");
+    }
+    const cls = it.state === "full" ? "ok" : (it.state === "none" ? "err" : "warn");
+    return `<tr>
+      <td class="mono">${fmtTs(it.ts)}</td>
+      <td class="mono">${escapeHtml(it.strategy || "—")}</td>
+      <td>${escapeHtml(it.preset || "—")}</td>
+      <td class="${cls}">${it.count || 0}/${it.total || 0}</td>
+      <td class="mono muted">${delta}</td></tr>`;
+  }).reverse().join("");
+  body.innerHTML = rows;
+}
+
+/* ── свои цели пробы ───────────────────────────────────────────────── */
+async function refreshUserGroups() {
+  try {
+    const res = await api().probe_groups();
+    if (!res || !res.ok) return;
+    const names = Object.keys(res.user || {});
+    $("#user-groups").innerHTML = names.length
+      ? names.map((n) => `<span class="chip"><span class="dot"></span>${escapeHtml(n)}
+          <span class="count">${(res.user[n] || []).length}</span></span>`).join("")
+      : "<span class='muted'>своих групп нет — встроенные: " +
+        escapeHtml((res.builtin || []).join(", ")) + "</span>";
+  } catch (e) {
+    toast("Группы пробы не прочитаны: " + e, "err");
+  }
+}
+
+async function addProbeTarget() {
+  const name = $("#pg-name").value.trim();
+  const url = $("#pg-url").value.trim();
+  if (!name || !url) { toast("Нужны имя группы и адрес", "err"); return; }
+  try {
+    const res = await api().probe_groups_add(name, url);
+    if (res && res.ok) {
+      toast(`Цель добавлена в «${name}»`, "ok");
+      $("#pg-url").value = "";
+      await refreshUserGroups();
+    } else {
+      toast("Добавление: " + ((res && res.error) || "не удалось"), "err");
+    }
+  } catch (e) {
+    toast("Ошибка добавления: " + e, "err");
+  }
+}
+
+async function removeProbeGroup() {
+  const name = $("#pg-name").value.trim();
+  if (!name) { toast("Укажите имя группы", "err"); return; }
+  const okBox = await confirmBox("Удаление группы пробы",
+    `Убрать пользовательскую группу «${name}» со всеми её целями?`);
+  if (!okBox) return;
+  try {
+    const res = await api().probe_groups_remove(name);
+    if (res && res.ok) {
+      toast(`Группа «${name}» удалена`, "ok");
+      await refreshUserGroups();
+    } else {
+      toast("Удаление: " + ((res && res.error) || "не удалось"), "err");
+    }
+  } catch (e) {
+    toast("Ошибка удаления: " + e, "err");
   }
 }
 
@@ -1193,6 +1288,9 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#btn-install").onclick = installRelease;
   $("#btn-quick-probe").onclick = () => { switchTab("diagnostics"); runProbes(); };
   $("#btn-probe").onclick = runProbes;
+  $("#btn-history-refresh").onclick = refreshHistory;
+  $("#btn-pg-add").onclick = addProbeTarget;
+  $("#btn-pg-remove").onclick = removeProbeGroup;
   $("#btn-ab").onclick = runAb;
   $("#btn-select").onclick = runSelect;
   $("#btn-select-cancel").onclick = () => api().select_cancel();
@@ -1265,6 +1363,8 @@ async function init() {
     await refreshState();
     await refreshVersions();
     await refreshStrategies();
+    await refreshHistory();
+    await refreshUserGroups();
     $("#statusbar-text").textContent = "готов";
     await warmupPrivileges();
   } catch (e) {

@@ -109,22 +109,60 @@ def probe_url(url: str, timeout: float = DEFAULT_TIMEOUT) -> dict:
         wrapped.close()
 
 
+def user_groups() -> dict[str, tuple[tuple[str, str], ...]]:
+    """Группы пользователя из настроек (settings.probe_groups).
+
+    Пользователь проверяет то, что ломается у него: свой сервис, свой
+    прокси, игру, которую нет в стандартном списке. Формат - имя группы и
+    цели либо парами ["имя","url"], либо словарями {name,url}.
+    """
+    from . import paths
+    raw = paths.read_settings().get("probe_groups") or {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, tuple[tuple[str, str], ...]] = {}
+    for name, items in raw.items():
+        targets: list[tuple[str, str]] = []
+        for entry in items or []:
+            if isinstance(entry, dict):
+                url, label = str(entry.get("url") or ""), str(entry.get("name") or "")
+            elif isinstance(entry, (list, tuple)) and len(entry) == 2:
+                label, url = str(entry[0]), str(entry[1])
+            else:
+                continue
+            if url.startswith("http://") or url.startswith("https://"):
+                targets.append((label or url.split("/")[2], url))
+        if targets:
+            out[str(name)] = tuple(targets)
+    return out
+
+
+def all_groups() -> dict[str, tuple[tuple[str, str], ...]]:
+    """Все проверяемые группы: встроенные плюс пользовательские."""
+    merged = dict(PROBE_GROUPS)
+    merged.update(user_groups())
+    return merged
+
+
+def group_names() -> list[str]:
+    return list(all_groups())
+
+
 def probe_group(group: str, timeout: float = DEFAULT_TIMEOUT) -> dict:
     """Все цели одной группы параллельно: {state, count, total, targets}.
 
     state: full - отвечает всё, partial - часть, none - ничего.
     """
-    targets_def = PROBE_GROUPS.get(group)
+    targets_def = all_groups().get(group)
     if not targets_def:
         return {"state": "none", "ok": False, "count": 0, "total": 0,
                 "targets": {}, "group": group}
     return _probe_many(targets_def, timeout, group)
 
 
-def probe_all(timeout: float = DEFAULT_TIMEOUT,
-              groups=None) -> dict:
-    """Все группы разом: {state, count, total, groups:{имя: отчёт}}."""
-    chosen = groups or list(PROBE_GROUPS)
+def probe_all(timeout: float = DEFAULT_TIMEOUT, groups=None) -> dict:
+    """Все группы разом (встроенные плюс пользовательские)."""
+    chosen = groups or list(all_groups())
     merged: dict[str, dict] = {}
     total = count = 0
     pool = ThreadPoolExecutor(max_workers=8)

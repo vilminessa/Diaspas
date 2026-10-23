@@ -209,6 +209,18 @@ select {
 }
 select:focus { outline: none; border-color: var(--accent); }
 
+input[type="text"] {
+  background: var(--widget);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-s);
+  padding: 6px 8px;
+  font: 13px var(--mono);
+  /* текст поля выделяется: в окне user-select выключен целиком */
+  user-select: text;
+}
+input[type="text"]:focus { outline: none; border-color: var(--accent); }
+
 /* ── чипы проб ─────────────────────────────────────────────── */
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip {
