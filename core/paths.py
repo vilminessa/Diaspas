@@ -117,12 +117,85 @@ def strategy_stem(filename: str) -> str:
 
 
 def read_settings() -> dict:
-    """Настройки Diaspas; отсутствующий файл - пустой словарь."""
+    """Настройки Diaspas; отсутствующий файл - пустой словарь.
+
+    Повреждённый JSON не должен превращаться в «настроек нет»: выбор
+    стратегий и активная папка при этом исчезли бы молча, а пользователь
+    увидел бы «папка не найдена». Битый файл убирается в сторону и
+    попадает в журнал - восстановиться можно из него вручную.
+    """
     path = app_dir() / "settings.json"
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError:
         return {}
+    except ValueError:
+        _quarantine(path)
+        return {}
+    if not isinstance(data, dict):
+        _quarantine(path)
+        return {}
+    return data
+
+
+def _quarantine(path: Path) -> None:
+    """Битый файл настроек - в settings.broken, с записью в журнал."""
+    from . import log as dlog
+    broken = path.with_name(path.stem + ".broken")
+    try:
+        path.replace(broken)
+        dlog.warning(f"settings.json повреждён - убран в {broken.name}; "
+                     f"настройки начаты заново")
+    except OSError as exc:
+        dlog.error(f"settings.json повреждён и не удалось убрать его "
+                   f"в сторону: {exc}")
+
+
+def migrate_settings() -> list[str]:
+    """Привести настройки к текущему виду; вернуть список миграций.
+
+    Формат менялся дважды: плоские ``preset_strategies`` от
+    одноверсионности и ключ-путь установки. Второй терялся при
+    переименовании папки, поэтому выбор переезжает под стабильный id
+    (см. installs.uid_of).
+    """
+    data = read_settings()
+    raw = data.get("preset_strategies")
+    if not isinstance(raw, dict) or not raw:
+        return []
+
+    from . import installs
+    from .presets import WILDCARD
+
+    nested: dict[str, dict] = {}
+    flat: dict[str, str] = {}
+    for key, value in raw.items():
+        if isinstance(value, dict):
+            nested[str(key)] = {str(k): str(v) for k, v in value.items() if v}
+        elif value:
+            flat[str(key)] = str(value)
+
+    changes: list[str] = []
+    if flat:
+        wide = nested.setdefault(WILDCARD, {})
+        for key, value in flat.items():
+            wide.setdefault(key, value)
+        changes.append("плоские записи стратегий → «для любой установки»")
+
+    for key, bucket in list(nested.items()):
+        if key in (WILDCARD, ""):
+            continue
+        uid = installs.uid_of(key)
+        if uid and uid != key:
+            merged = nested.setdefault(uid, {})
+            merged.update({k: v for k, v in bucket.items() if v})
+            nested.pop(key, None)
+            changes.append("ключ-путь установки → её стабильный id")
+
+    if changes:
+        data["preset_strategies"] = {k: v for k, v in nested.items() if v}
+        write_settings(data)
+    return changes
 
 
 def write_settings(data: dict) -> None:

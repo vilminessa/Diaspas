@@ -191,9 +191,19 @@ def _best_cache_path() -> Path:
 
     Приём Synfronia: версии zapret живут по-своему (1.9.x и 1.10.x
     различаются набором стратегий), поэтому выбор, сделанный для 1.10.3,
-    нельзя подмешивать 1.10.2 - ключ кэша путь установки.
+    нельзя подмешивать 1.10.2. Ключ - стабильный id установки (см.
+    installs.uid_of), а не путь: переименование папки раньше теряло подбор.
     """
     return paths.app_dir() / "strategy-cache.json"
+
+
+def _cache_key(install: str) -> str:
+    """Ключ кэша для установки: uid, а для чужих папок - путь."""
+    from . import installs
+    try:
+        return installs.uid_of(str(install))
+    except Exception:  # noqa: BLE001 - кэш не должен рвать перебор
+        return str(install)
 
 
 def load_best(install: str) -> str | None:
@@ -204,7 +214,10 @@ def load_best(install: str) -> str | None:
         return None
     if not isinstance(data, dict):
         return None
-    entry = data.get(str(install))
+    key = _cache_key(install)
+    entry = data.get(key)
+    if entry is None:
+        entry = data.get(str(install))    # наследие: ключом был путь
     if isinstance(entry, dict):
         name = entry.get("strategy")
         return str(name) if name else None
@@ -220,8 +233,11 @@ def save_best(install: str, strategy: str) -> None:
             data = {}
     except (OSError, ValueError):
         data = {}
-    data[str(install)] = {"strategy": str(strategy),
-                          "checked": int(time.time())}
+    key = _cache_key(install)
+    data[key] = {"strategy": str(strategy), "checked": int(time.time())}
+    if key != str(install):
+        # миграция: прежняя запись по пути больше не нужна
+        data.pop(str(install), None)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")

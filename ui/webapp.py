@@ -83,6 +83,11 @@ class App:
     def __init__(self) -> None:
         self.emitter = Emitter()
         self.zapret_root, self.zapret_source = paths.zapret_dir_info()
+        # формат настроек менялся: плоские переопределения стратегий и
+        # ключ-путь установки. Мигрировать надо до первого чтения пресетов,
+        # иначе выбор пользователя прочитался бы как «дефолт».
+        for change in paths.migrate_settings():
+            self.log("info", f"настройки обновлены: {change}")
         self.last_probes: dict | None = None
         self._select_running = False
         # один warning о пропавшей службе на сессию - без спама в журнал
@@ -261,6 +266,18 @@ class App:
             "zapret_dir": str(self.zapret_root) if self.zapret_root else None,
             "release_note": settings.get("zapret_release") or "",
         }
+
+    def set_install(self, path, source: str = "settings") -> None:
+        """Единственная точка смены активной установки.
+
+        Присваивания были разбросаны по четырём операциям (переключение
+        версии, обновление, скачивание релиза, выбор папки вручную), и
+        фоновый опрос мог ещё несколько секунд читать состояние старой
+        папки. Здесь смена пути сопровождается событием state.
+        """
+        self.zapret_root = Path(path) if path is not None else None
+        self.zapret_source = source or "settings"
+        self.emitter.emit("state", self._collect_state())
 
     def _strategy_label(self, st: service.ServiceState) -> str:
         """Короткая метка фактической стратегии службы."""
@@ -504,8 +521,7 @@ class App:
         settings = paths.read_settings()
         settings["zapret_dir"] = path
         paths.write_settings(settings)
-        self.zapret_root = Path(path)
-        self.zapret_source = "settings"
+        self.set_install(path, "settings")
 
         # служба переустанавливается на новый путь текущим пресетом.
         # Пресеты собираются для НОВОЙ папки: переопределения хранятся по
@@ -649,8 +665,7 @@ class App:
         settings["zapret_release"] = rel.tag
         paths.write_settings(settings)
         installs.register(root, source="download")   # prev -> rollback
-        self.zapret_root = root
-        self.zapret_source = "settings"
+        self.set_install(root, "settings")
 
         key = presets_mod.active_preset_key() or "discord_youtube"
         presets = presets_mod.load_presets(root)
@@ -869,8 +884,7 @@ class App:
             settings["zapret_dir"] = str(root)
             settings["zapret_release"] = rel.tag
             paths.write_settings(settings)
-            self.zapret_root = root
-            self.zapret_source = "settings"
+            self.set_install(root, "settings")
             # версия попадает в реестр и становится активной; прежняя
             # активная сохраняется как точка отката
             installs.register(root, source="download")
@@ -927,8 +941,7 @@ class App:
             settings = paths.read_settings()
             settings["zapret_dir"] = str(path)
             paths.write_settings(settings)
-            self.zapret_root = path
-            self.zapret_source = "settings"
+            self.set_install(path, "manual")
             # ручная папка тоже попадает в реестр версий
             installs.register(path, source="manual")
             self.log("info", f"папка zapret: {path}")

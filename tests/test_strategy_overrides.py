@@ -60,7 +60,8 @@ def test_choice_survives_when_install_not_found(isolated, monkeypatch):
     pm.set_strategy("apex_ea", "general (ALT7).bat")
     assert strategy_of("apex_ea") == "general (ALT7).bat"
     stored = paths.read_settings()["preset_strategies"]
-    assert stored == {"apex_ea": "general (ALT7).bat"}
+    assert stored == {"*": {"apex_ea": "general (ALT7).bat"}}, \
+        "без установки выбор ложится под ключ «для любой установки»"
 
     # другой пресет не затронут
     assert strategy_of("discord_youtube") == "general (ALT11).bat"

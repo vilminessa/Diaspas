@@ -36,6 +36,10 @@ class App(tk.Tk):
         # очередь из фоновых потоков в главный
         self._q: queue.Queue = queue.Queue()
         self._busy = False
+        # формат настроек менялся - миграция до первого чтения пресетов
+        # (иначе выбор пользователя прочитался бы как «дефолт»)
+        for change in paths.migrate_settings():
+            dlog.info(f"настройки обновлены: {change}")
         self._zapret_root: Path | None = paths.zapret_dir_from_settings()
         self._last_ab: dict | None = None
         self._last_select: dict | None = None

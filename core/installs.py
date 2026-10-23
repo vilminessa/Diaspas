@@ -23,11 +23,17 @@ import json
 import re
 import shutil
 import time
+import uuid
 import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .release import ReleaseError
+
+# Маркер установки: стабильный id переживает переименование и перенос
+# папки (см. uid_of). Свой файл, а не реестр - реестр можно потерять или
+# пересоздать, а привязка выбора стратегий должна остаться.
+UID_FILE = ".diaspas.json"
 
 # Имя папки релиза Flowseal: zapret-discord-youtube-<tag>
 _VERSION_RE = re.compile(r"zapret-discord-youtube-(.+)$", re.IGNORECASE)
@@ -47,6 +53,7 @@ class Install:
     last_used: int = 0
     source: str = "download"   # download | autodiscover | manual
     layout: str = ""           # flowseal | winws (пусто - определить)
+    uid: str = ""              # стабильный id установки (см. uid_of)
 
     @property
     def dir(self) -> Path:
@@ -103,8 +110,69 @@ def items() -> list[Install]:
             added=int(raw.get("added") or 0),
             last_used=int(raw.get("last_used") or 0),
             source=str(raw.get("source") or "download"),
+            layout=str(raw.get("layout") or ""),
+            uid=str(raw.get("uid") or ""),
         ))
     return out
+
+
+# -- стабильный id установки -------------------------------------------------
+
+def marker_path(root: Path | str) -> Path:
+    return Path(root) / UID_FILE
+
+
+def read_marker(root: Path | str) -> str:
+    """uid из маркерного файла установки; "" - маркера нет."""
+    try:
+        data = json.loads(marker_path(root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    return str(data.get("uid") or "") if isinstance(data, dict) else ""
+
+
+def write_marker(root: Path | str, uid_value: str) -> None:
+    root = Path(root)
+    try:
+        marker_path(root).write_text(
+            json.dumps({"uid": uid_value, "created": int(time.time())},
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8")
+    except OSError:
+        # папка может быть только что распакована в read-only место или
+        # занята антивирусом: отсутствие маркера не должно рвать установку
+        pass
+
+
+def uid_of(path: Path | str) -> str:
+    """Стабильный ключ установки: uid из маркера, иначе путь.
+
+    Второй случай - установка, которую пользователь указал вручную и
+    которую Diaspas не ставил: своего id у неё нет, и выбор ложится на
+    путь (миграция перепишет на uid при первом register).
+    """
+    marker = read_marker(path)
+    if marker:
+        return marker
+    raw = load()
+    for item in raw.get("items", []):
+        if isinstance(item, dict) and str(item.get("path")) == str(Path(path)):
+            if item.get("uid"):
+                # реестр знает id, а маркер потерян - восстановить молча
+                write_marker(path, str(item["uid"]))
+                return str(item["uid"])
+            break
+    return str(Path(path))
+
+
+def path_for_uid(uid_value: str) -> Path | None:
+    """Папка установки по её id (для чтения старых записей настроек)."""
+    if not uid_value:
+        return None
+    for item in items():
+        if item.uid == uid_value and is_valid(item.path):
+            return Path(item.path)
+    return None
 
 
 def is_valid(path) -> bool:
@@ -126,19 +194,28 @@ def register(path, source: str = "download") -> Install:
     data = load()
     now = int(time.time())
     layout = detect_layout(path)["layout"] or ""
+    uid_value = read_marker(path) or next(
+        (str(r.get("uid")) for r in data["items"]
+         if isinstance(r, dict) and str(r.get("path")) == str(path) and r.get("uid")),
+        "")
+    if not uid_value:
+        uid_value = uuid.uuid4().hex[:12]
+        write_marker(path, uid_value)
     for raw in data["items"]:
         if isinstance(raw, dict) and str(raw.get("path")) == str(path):
             raw["last_used"] = now
             raw["source"] = source
             raw["layout"] = layout
+            raw["uid"] = uid_value
             data["active"] = str(path)
             save(data)
             return Install(path=str(path), version=str(raw.get("version") or ""),
                            added=int(raw.get("added") or 0),
-                           last_used=now, source=source, layout=layout)
+                           last_used=now, source=source, layout=layout,
+                           uid=uid_value)
     entry = asdict(Install(path=str(path), version=version_of(path),
                            added=now, last_used=now, source=source,
-                           layout=layout))
+                           layout=layout, uid=uid_value))
     data["items"].append(entry)
     data["active"] = str(path)
     save(data)

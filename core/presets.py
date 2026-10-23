@@ -112,18 +112,38 @@ DEFAULT_PRESETS: tuple[Preset, ...] = (
 
 # -- переопределение стратегии: выбор пользователя по установке ----------
 
-def _root_key(root: Path | str | None) -> str:
-    return str(Path(root)) if root is not None else ""
+# Ключ «для любой установки»: плоское наследие одноверсионности и
+# осознанный глобальный выбор живут под ним.
+WILDCARD = "*"
+
+
+def _root_keys(root: Path | str | None) -> list[str]:
+    """Ключи, под которыми лежит выбор ЭТОЙ установки: uid, затем путь.
+
+    Id стабилен при переименовании и переносе папки (см.
+    installs.uid_of), поэтому выбор пользователя не теряется. Путь
+    остаётся вторым ключом: установки, поставленные не Diaspas, своего
+    id не имеют, а старые записи настроек лежат именно под путём.
+    """
+    if root is None:
+        return []
+    from . import installs
+    path = str(Path(root))
+    try:
+        uid = installs.uid_of(path)
+    except Exception:  # noqa: BLE001 - выбор не должен рвать чтение пресетов
+        uid = ""
+    return list(dict.fromkeys([k for k in (uid, path) if k]))
 
 
 def _split_overrides(raw) -> tuple[dict, dict]:
     """Разделить переопределения на «по установке» и плоское наследие.
 
-    Новый вид - ``{путь установки: {ключ пресета: файл}}``. Плоский
+    Вид - ``{ключ установки: {ключ пресета: файл}}``. Плоский
     ``{ключ: файл}`` остался от одноверсионности: он перекрывал все
     установки сразу, поэтому выбор ALT13 в 1.10.x ломал применение в
     версии, где такого файла нет. Плоские записи читаются как
-    «для любой установки», но вытесняются явным выбором по пути.
+    «для любой установки» (то же, что ключ ``*``).
     """
     nested: dict[str, dict] = {}
     legacy: dict[str, str] = {}
@@ -137,14 +157,13 @@ def _split_overrides(raw) -> tuple[dict, dict]:
     return nested, legacy
 
 
-def _override_map(settings: dict, root: str = "") -> dict[str, str]:
-    """Что перекрыть для этой установки: наследие + запись по пути."""
+def _override_map(settings: dict, root: Path | str | None = None) -> dict[str, str]:
+    """Что перекрыть для этой установки: наследие, wildcard, затем ключи установки."""
     nested, legacy = _split_overrides(settings.get("preset_strategies"))
-    out = dict(legacy)
-    if root:
-        out.update(nested.get(root) or {})
-    elif nested:
-        out.update(next(iter(nested.values()), {}))
+    out = dict(legacy)                  # наследие == «для любой установки»
+    out.update(nested.get(WILDCARD) or {})
+    for key in _root_keys(root):
+        out.update(nested.get(key) or {})
     return out
 
 
@@ -213,7 +232,7 @@ def load_presets(root: Path | str | None = None) -> list[Preset]:
     if root is None:
         root = paths.zapret_dir_info()[0]
     settings = paths.read_settings()
-    overrides = _override_map(settings, _root_key(root))
+    overrides = _override_map(settings, root)
 
     presets: list[Preset] = []
     for preset in DEFAULT_PRESETS:
@@ -245,7 +264,7 @@ def strategy_override(key: str, root: Path | str | None = None) -> str:
     from . import paths
     if root is None:
         root = paths.zapret_dir_info()[0]
-    return _override_map(paths.read_settings(), _root_key(root)).get(key, "")
+    return _override_map(paths.read_settings(), root).get(key, "")
 
 
 def set_strategy(key: str, strategy: str | None,
@@ -261,28 +280,29 @@ def set_strategy(key: str, strategy: str | None,
     from . import paths
     if root is None:
         root = paths.zapret_dir_info()[0]
-    path = _root_key(root)
     settings = paths.read_settings()
     nested, legacy = _split_overrides(settings.get("preset_strategies"))
-    if path:
-        bucket = nested.setdefault(path, {})
-        if strategy:
-            bucket[key] = str(strategy)
-        else:
-            bucket.pop(key, None)
-        # Сброс «вернуть дефолт» обязан убирать и плоское наследие: без
-        # этого выбор по установке выглядел бы сброшенным, а применялась
-        # бы старая глобальная запись.
-        legacy.pop(key, None)
-    elif strategy:
-        # Установки нет (папка не найдена): выбор ложится плоско и его
-        # нельзя сносить тем же pop'ом - иначе запись теряется в тот же
-        # вызов, и переключение стратегии молча возвращается в дефолт.
-        legacy[key] = str(strategy)
+    # Плоское наследие мигрирует в wildcard: смысл один - «для любой
+    # установки», и его можно снять явным выбором.
+    if legacy:
+        wide = nested.setdefault(WILDCARD, {})
+        for k, v in legacy.items():
+            wide.setdefault(k, v)
+
+    keys = _root_keys(root)
+    own = keys[0] if keys else WILDCARD
+    bucket = nested.setdefault(own, {})
+    if strategy:
+        bucket[key] = str(strategy)
     else:
-        legacy.pop(key, None)
+        bucket.pop(key, None)
+    if own != WILDCARD:
+        # Явный выбор по установке снимает глобальную запись пресета:
+        # иначе сброс «вернуть дефолт» здесь возвращал бы старую
+        # глобальную стратегию.
+        nested.get(WILDCARD, {}).pop(key, None)
     nested = {k: v for k, v in nested.items() if v}
-    settings["preset_strategies"] = {**legacy, **nested}
+    settings["preset_strategies"] = nested
     paths.write_settings(settings)
 
 
