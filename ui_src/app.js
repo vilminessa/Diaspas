@@ -65,6 +65,25 @@ function confirmBox(title, body) {
   });
 }
 
+function promptBox(title, body, value = "") {
+  return new Promise((resolve) => {
+    $("#modal-input-title").textContent = title;
+    $("#modal-input-body").textContent = body;
+    const field = $("#modal-input-field");
+    field.value = value;
+    $("#modal-input").classList.remove("hidden");
+    const ok = $("#modal-input-ok"), cancel = $("#modal-input-cancel");
+    const done = (val) => {
+      $("#modal-input").classList.add("hidden");
+      ok.onclick = cancel.onclick = null;
+      resolve(val);
+    };
+    ok.onclick = () => done(field.value);
+    cancel.onclick = () => done(null);
+    field.focus();
+  });
+}
+
 function setBusy(busy, label) {
   S.busy = busy;
   $("#busy-ind").classList.toggle("hidden", !busy);
@@ -278,6 +297,131 @@ function updateStrategyButtons() {
   // записанного для пресета (следующее применение пресета его использует)
   $("#btn-save-strategy").classList.toggle(
     "hidden", !chosen || chosen === stored);
+  // «Попробовать» имеет смысл только против работающей службы: без неё
+  // проверять нечего, и возвратить тоже нечего
+  $("#btn-try-strategy").classList.toggle(
+    "hidden", !chosen || !running || chosen === running);
+  loadStrategyDetail(chosen);
+}
+
+/* Разбор аргументов winws: имя файла ничего не говорит пользователю,
+   поэтому под селектором показываем флаги и diff к тому, что стоит. */
+async function loadStrategyDetail(name) {
+  const box = $("#strategy-detail");
+  if (!name) { box.classList.add("hidden"); return; }
+  try {
+    const res = await api().strategy_detail(name);
+    if (!res || !res.ok) {
+      box.classList.remove("hidden");
+      box.textContent = "разбор стратегии: " + ((res && res.error) || "нет ответа");
+      return;
+    }
+    box.classList.remove("hidden");
+    box.textContent = strategyDetailText(res);
+  } catch (e) {
+    box.classList.remove("hidden");
+    box.textContent = "разбор стратегии не получился: " + e;
+  }
+}
+
+function strategyDetailText(res) {
+  const d = res.detail || {};
+  const parts = [];
+  if (!d.ok) return "не разбирается: " + (d.error || "ошибка");
+  if (d.headline && d.headline.length) parts.push(d.headline.join(" "));
+  const diff = res.diff || {};
+  if (diff.unknown_baseline) {
+    parts.push("служба не отвечает — сравнить не с чем");
+  } else if (diff.same) {
+    parts.push("отличий от текущей нет");
+  } else {
+    if (diff.added && diff.added.length) parts.push("+ " + diff.added.join(" "));
+    if (diff.removed && diff.removed.length) parts.push("- " + diff.removed.join(" "));
+    if (diff.changed && diff.changed.length) parts.push("~ " + diff.changed.join("  "));
+  }
+  if (res.best && res.best !== d.file) {
+    parts.push(`подобранная перебором: ${labelOf(res.best)}`);
+  }
+  parts.push(`${d.size} байт, ${d.features.count} флагов`);
+  return parts.join("\n");
+}
+
+async function tryChosenStrategy() {
+  // оценка рекомендации до пересоздания службы: probe -> apply -> probe -> возврат
+  const chosen = $("#strategy-select").value;
+  const key = strategyTargetKey();
+  if (!chosen || !key || key === "off") return;
+  const okBox = await confirmBox("Проба стратегии",
+    `Служба будет переустановлена на «${labelOf(chosen)}», пробы сравнят` +
+    ` обход, затем вернётся прежнее состояние.\n\nПробовать?`);
+  if (!okBox) return;
+  setBusy(true, `пробую ${labelOf(chosen)}…`);
+  try {
+    const res = await api().try_strategy(key, chosen);
+    if (!res || !res.ok) {
+      toast("Проба: " + ((res && res.error) || "не удалось"), "err");
+      if (res && res.restored === false) {
+        toast("Прежнее состояние НЕ восстановлено — нажмите «Обновить»" +
+              " и примените пресет", "err");
+      }
+    } else {
+      const b = res.before || {}, a = res.after || {};
+      toast(`${labelOf(chosen)}: ${b.count}/${b.total} → ${a.count}/${a.total}` +
+            (res.better ? " — лучше" : " — не лучше"), res.better ? "ok" : "");
+      $("#strategy-detail").textContent =
+        `проба: было ${b.count}/${b.total} (${b.state}), стало ` +
+        `${a.count}/${a.total} (${a.state}); прежнее восстановлено ` +
+        (res.restored ? "да" : "НЕТ — примените пресет вручную");
+    }
+  } catch (e) {
+    toast("Ошибка пробы: " + e, "err");
+  } finally {
+    setBusy(false, "готов");
+    await refreshState();
+    await refreshStrategies();
+  }
+}
+
+/* ── перенос связки пресета ─────────────────────────────────────────── */
+
+async function exportCurrentPreset() {
+  const key = (S.state && S.state.preset_key)
+    || (S.strategies && S.strategies.target_preset);
+  if (!key) { toast("Нет текущего пресета для экспорта", "err"); return; }
+  try {
+    const res = await api().export_preset(key);
+    if (!res || !res.ok) {
+      toast("Экспорт: " + ((res && res.error) || "не удалось"), "err");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(res.json);
+      toast("Связка скопирована в буфер обмена", "ok");
+    } catch {
+      await promptBox("Экспорт связки", "Сохраните текст:", res.json);
+    }
+  } catch (e) {
+    toast("Ошибка экспорта: " + e, "err");
+  }
+}
+
+async function importPresetBundle() {
+  const text = await promptBox("Импорт связки",
+    "Вставьте json связки (title обязателен). Стратегия проверяется по " +
+    "этой установке: чужой файл не запишется.", "");
+  if (!text) return;
+  try {
+    const res = await api().import_preset(text);
+    if (res && res.ok) {
+      toast("Пресет добавлен: " + res.key, "ok");
+      await refreshPresets();
+      await refreshStrategies();
+    } else {
+      toast("Импорт: " + ((res && res.error) || "не удалось"), "err");
+    }
+  } catch (e) {
+    toast("Ошибка импорта: " + e, "err");
+  }
 }
 
 async function applyChosenStrategy() {
@@ -292,13 +436,23 @@ async function applyChosenStrategy() {
   const title = p ? p.title : key;
   const okBox = await confirmBox("Применение стратегии",
     `Пресет «${title}» будет применён со стратегией «${labelOf(chosen)}».\n` +
-    `Стратегия запомнится для этого пресета в этой установке.\n\nПродолжить?`);
+    `Стратегия запомнится для этого пресета в этой установке.\n` +
+    `После применения обход проверится пробами; если он пропадёт — ` +
+    `автоматически вернётся прежнее состояние.\n\nПродолжить?`);
   if (!okBox) return;
   setBusy(true, `применяю ${labelOf(chosen)}…`);
   try {
-    const res = await api().apply_preset(key, chosen);
+    // verify=true: проверка пробами с откатом — смена стратегии опаснее,
+    // чем применение пресета с его базовой стратегией
+    const res = await api().apply_preset(key, chosen, true);
     if (res && res.ok) {
-      toast(`Пресет «${title}» со стратегией ${labelOf(chosen)} применён`, "ok");
+      const b = res.before || {}, a = res.after || {};
+      const verdict = a.total ? ` обход: ${a.count}/${a.total}` : "";
+      toast(`Пресет «${title}» со стратегией ${labelOf(chosen)} применён` + verdict, "ok");
+    } else if (res && res.rolled_back) {
+      const b = res.before || {}, a = res.after || {};
+      toast(`Обход пропал (${b.count}/${b.total} → 0/${a.total}) — возвращено ` +
+            `прежнее состояние${res.restore_ok ? "" : ", возврат НЕ удался"}`, "err");
     } else {
       toast("Ошибка: " + ((res && res.error) || "неизвестно"), "err");
     }
@@ -352,10 +506,13 @@ async function takeBestStrategy() {
   if (!okBox) return;
   setBusy(true, `применяю ${labelOf(best)}…`);
   try {
-    const res = await api().apply_preset(key, best);
+    const res = await api().apply_preset(key, best, true);
     if (res && res.ok) {
       toast(`Стратегия ${labelOf(best)} применена`, "ok");
       $("#btn-take-best").classList.add("hidden");
+    } else if (res && res.rolled_back) {
+      toast("Обход пропал после применения рекомендации — возвращено " +
+            "прежнее состояние", "err");
     } else {
       toast("Ошибка: " + ((res && res.error) || "неизвестно"), "err");
     }
@@ -1029,8 +1186,12 @@ document.addEventListener("DOMContentLoaded", () => {
   // стратегии: выбор, применение и запоминание без перезапуска службы
   $("#btn-apply-strategy").onclick = applyChosenStrategy;
   $("#btn-save-strategy").onclick = saveChosenStrategy;
+  $("#btn-try-strategy").onclick = tryChosenStrategy;
   $("#strategy-select").onchange = updateStrategyButtons;
   $("#strategy-preset").onchange = updateStrategyButtons;
+  // перенос связки «пресет + стратегия + списки»
+  $("#btn-export-preset").onclick = exportCurrentPreset;
+  $("#btn-import-preset").onclick = importPresetBundle;
   // восстановление после перезапуска
   $("#btn-restore-after-restart").onclick = () => restoreAfterRestart();
   // скачивание версий

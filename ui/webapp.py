@@ -25,9 +25,11 @@ from pathlib import Path
 
 import webview
 
+from dataclasses import replace
+
 from core import abtest, autoselect, installs, log as dlog, paths
 from core import presets as presets_mod
-from core import probes, release, service
+from core import probes, release, service, strategies as strategies_mod
 from i18n import tr
 from ui.bundle import INDEX_HTML
 
@@ -363,6 +365,89 @@ class App:
                 "strategy_label": paths.strategy_label(strategy)
                                   if strategy else ""}
 
+    def strategy_detail(self, name: str) -> dict:
+        """Что делает стратегия и чем отличается от стоящей сейчас.
+
+        Выбор стратегии раньше был выбором вслепую: в списке только имя
+        файла. Здесь - разобранные аргументы winws, diff относительно
+        фактической стратегии службы и подсказка из кэша перебора.
+        """
+        root = self.zapret_root
+        if root is None:
+            return {"ok": False, "error": tr("err.no_dir")}
+        st = service.state()
+        current = presets_mod.current_strategy_file(root, st)
+        chosen = strategies_mod.describe(root, name)
+        baseline = strategies_mod.describe(root, current) if current else None
+        return {"ok": True, "detail": chosen,
+                "diff": strategies_mod.diff(baseline, chosen),
+                "current": current or "",
+                "best": autoselect.load_best(str(root)) or ""}
+
+    def try_strategy(self, key: str, strategy: str = "") -> dict:
+        """«Попробовать без применения»: поставить, проверить пробами, вернуть.
+
+        Оценка рекомендации перебора до того, как пользователь согласится
+        пересоздать службу. Выбор в настройки НЕ пишется: проба не меняет
+        состояние пресета, иначе «попробовать» стало бы «применить».
+        """
+        root = self.zapret_root
+        if root is None:
+            return {"ok": False, "error": tr("err.no_dir")}
+        preset = next((p for p in presets_mod.load_presets(root)
+                       if p.key == key), None)
+        if preset is None:
+            return {"ok": False, "error": f"пресет {key!r} не найден"}
+        if preset.off:
+            return {"ok": False, "error": "пресет «Выкл» не содержит стратегии"}
+        if strategy:
+            if strategy not in presets_mod.available_strategies(root):
+                return {"ok": False,
+                        "error": f"в установке нет стратегии {strategy}"}
+            preset = replace(preset, strategy=strategy)
+
+        self.emitter.emit("busy", {"busy": True,
+                                   "label": f"пробую {paths.strategy_label(preset.strategy)}…"})
+        try:
+            res = presets_mod.try_strategy(preset, root, log=self.log)
+        finally:
+            self.emitter.emit("busy", {"busy": False, "label": "готов"})
+            self.emitter.emit("state", self.state())
+        return res
+
+    # -- перенос связки «пресет + стратегия + списки» ----------------------
+
+    def export_preset(self, key: str) -> dict:
+        """Связка пресета как json: перенос на другую машину/версию."""
+        root = self.zapret_root
+        if root is None:
+            return {"ok": False, "error": tr("err.no_dir")}
+        preset = next((p for p in presets_mod.load_presets(root)
+                       if p.key == key), None)
+        if preset is None:
+            return {"ok": False, "error": f"пресет {key!r} не найден"}
+        bundle = presets_mod.export_bundle(preset)
+        return {"ok": True, "bundle": bundle,
+                "json": json.dumps(bundle, ensure_ascii=False, indent=2)}
+
+    def import_preset(self, payload) -> dict:
+        """Добавить связку из json как пользовательский пресет.
+
+        Чужой файл стратегии не записывается: пресет создаётся с дефолтом
+        этой установки, а стратегию пользователь выбирает селектором.
+        """
+        root = self.zapret_root
+        if root is None:
+            return {"ok": False, "error": tr("err.no_dir")}
+        try:
+            data = json.loads(payload) if isinstance(payload, str) else payload
+            key = presets_mod.import_bundle(data, root)
+        except (ValueError, TypeError) as exc:
+            return {"ok": False, "error": str(exc)}
+        self.log("info", f"импортирован пресет {key!r}")
+        self.emitter.emit("state", self.state())
+        return {"ok": True, "key": key}
+
     # -- версии zapret ----------------------------------------------------
 
     def versions(self) -> dict:
@@ -646,7 +731,8 @@ class App:
 
     # -- операции ------------------------------------------------------
 
-    def apply_preset(self, key: str, strategy: str | None = None) -> dict:
+    def apply_preset(self, key: str, strategy: str | None = None,
+                     verify: bool = False) -> dict:
         """Применить пресет; strategy - переопределение его стратегии.
 
         Стратегия сохраняется в настройках ЭТОЙ установки (маркер/инференс/
@@ -673,7 +759,12 @@ class App:
             self.log("info", tr("uac.incoming"))
             self.emitter.emit("toast",
                               {"text": tr("uac.incoming"), "kind": ""})
-        res = presets_mod.apply(preset, self.zapret_root, log=self.log)
+        # verify: проверить обход пробами и откатать, если он пропал.
+        # Дорого по времени (секунды), поэтому только по явному запросу UI.
+        res = (presets_mod.apply_verified(preset, self.zapret_root,
+                                          log=self.log)
+               if verify and not preset.off
+               else presets_mod.apply(preset, self.zapret_root, log=self.log))
         self.emitter.emit("state", self.state())
         return res
 
@@ -899,6 +990,10 @@ def run() -> int:
     api.state = guard(app.state)
     api.strategies = guard(app.strategies)
     api.set_preset_strategy = guard(app.set_preset_strategy)
+    api.strategy_detail = guard(app.strategy_detail)
+    api.try_strategy = guard(app.try_strategy)
+    api.export_preset = guard(app.export_preset)
+    api.import_preset = guard(app.import_preset)
     api.versions = guard(app.versions)
     api.switch_version = guard(app.switch_version)
     api.rollback_version = guard(app.rollback_version)

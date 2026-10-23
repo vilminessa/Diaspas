@@ -87,9 +87,15 @@
             </label>
             <button id="btn-apply-strategy" class="btn hidden">Применить стратегию</button>
             <button id="btn-save-strategy" class="btn hidden">Запомнить</button>
+            <button id="btn-try-strategy" class="btn hidden">Попробовать без применения</button>
             <span class="mono muted" id="strategy-current"></span>
             <span class="mono muted" id="strategy-layout"></span>
           </div>
+
+          <!-- разбор аргументов winws: выбор стратегии вслепую по имени
+               файла был гаданием, теперь видно что она делает и чем
+               отличается от стоящей -->
+          <div id="strategy-detail" class="note muted hidden"></div>
 
           <!-- скачивание любой доступной версии из обоих источников -->
           <div class="btn-row">
@@ -125,6 +131,12 @@
           <div class="card-title">Пресеты</div>
           <div id="preset-grid" class="preset-grid"></div>
           <div id="preset-hint" class="note muted">Наведите на пресет — появится описание.</div>
+          <!-- перенос связки «пресет + стратегия + списки»: рабочую
+               конфигурацию можно забрать на другую машину -->
+          <div class="btn-row">
+            <button id="btn-export-preset" class="btn">Экспорт текущего</button>
+            <button id="btn-import-preset" class="btn">Импорт связки…</button>
+          </div>
         </div>
       </div>
     </div>
@@ -222,6 +234,20 @@
     <div class="btn-row right">
       <button class="btn" id="modal-cancel">Отмена</button>
       <button class="btn primary" id="modal-ok">ОК</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ модал ввода (импорт связки) ═══ -->
+<div id="modal-input" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-title" id="modal-input-title"></div>
+    <div class="modal-body" id="modal-input-body"></div>
+    <textarea id="modal-input-field" rows="8" spellcheck="false"
+              class="mono" style="width:100%;background:var(--widget);color:var(--text);border:1px solid var(--border-strong);border-radius:var(--radius-s);padding:8px;user-select:text;"></textarea>
+    <div class="btn-row right">
+      <button class="btn" id="modal-input-cancel">Отмена</button>
+      <button class="btn primary" id="modal-input-ok">Добавить</button>
     </div>
   </div>
 </div>

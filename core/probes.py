@@ -197,6 +197,19 @@ def _probe_many(targets_def, timeout: float, group: str) -> dict:
             "total": total, "targets": targets, "group": group}
 
 
+VERIFY_GROUPS = ("discord", "youtube")
+
+
+def probe_quick(timeout: float = 3.0, groups=None) -> dict:
+    """Быстрая проверка «обход вообще работает» - для verify и проб стратегий.
+
+    Полный прогон (4 группы, таймаут 6с) превращал бы каждое применение
+    пресета в минуту ожидания. Здесь только базовые маршруты, и их
+    достаточно, чтобы отличить «работает» от «ничего не отвечает».
+    """
+    return probe_all(timeout=timeout, groups=groups or VERIFY_GROUPS)
+
+
 def probe_line(report: dict) -> str:
     """Строка журнала: маршрут одной строкой, без интерпретации."""
     parts = []

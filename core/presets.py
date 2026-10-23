@@ -21,6 +21,7 @@ Flowseal, ``preset*.cmd`` в win-bundle). Переопределения хра�
 
 from __future__ import annotations
 
+import re
 import shutil
 import time
 from dataclasses import dataclass, replace
@@ -670,3 +671,197 @@ def current_preset(root: Path | None, state: service.ServiceState,
 def _strategy_names(root: Path) -> list[str]:
     from .paths import strategy_files
     return strategy_files(Path(root))
+
+
+# -- проверка обхода и откат -------------------------------------------------
+
+def _quick_probe() -> dict:
+    """Быстрая проверка обхода: базовые группы, короткий таймаут.
+
+    verify не должен превращать применение пресета в минуту ожидания.
+    """
+    from . import probes
+    return probes.probe_quick()
+
+
+def _summary(report: dict) -> dict:
+    return {"state": report.get("state") or "none",
+            "count": int(report.get("count") or 0),
+            "total": int(report.get("total") or 0)}
+
+
+def restore_target(root: Path | str) -> Preset | None:
+    """Пресет со стратегией, которые стоят СЕЙЧАС - чем откатывать.
+
+    Распознанный пресет берётся как есть (с переопределённой стратегией).
+    Если состояние службы не похоже ни на один пресет (правка через
+    service.bat), собирается объект из цели-маркера и фактической
+    стратегии: иначе откат «в дефолт ALT11» сам был бы поломкой.
+    """
+    root = Path(root)
+    st = service.state()
+    if not st.installed:
+        return None
+    presets = load_presets(root)
+    marker = active_preset_key()
+    current = current_preset(root, st, presets=presets, active_key=marker)
+    if current is not None:
+        return current
+
+    strategy = current_strategy_file(root, st)
+    key = (marker or last_known_preset_key()
+           or next((p.key for p in presets if not p.off), ""))
+    base = next((p for p in presets if p.key == key), None)
+    if base is None or base.off:
+        return None
+    return replace(base, strategy=strategy or base.strategy)
+
+
+def apply_verified(preset: Preset, root: Path, *, log=None,
+                   probe=None, previous: Preset | None | bool = False) -> dict:
+    """Применить пресет и, если обход пропал, вернуть прежнее состояние.
+
+    Откат срабатывает только на доказанное ухудшение: после применения
+    ни одна цель не отвечает, а до применения отвечали. При отсутствии
+    сети (total == 0) пробы ничего не доказывают, и откат был бы
+    ложным «починим» - поэтому он не делается.
+    """
+    probe = probe or _quick_probe
+    prev = (restore_target(root) if previous is False else previous)
+    before = _summary(probe()) if prev is not None else _summary(
+        {"state": "none", "count": 0, "total": 0})
+
+    res = apply(preset, root, log=log)
+    if not res.get("ok"):
+        return res
+    if prev is None:
+        # Службы до применения не было: сравнивать не с чем, а пробы при
+        # этом дали бы ложный «ухудшили» вердикт на пустом месте.
+        return res
+
+    after = _summary(probe())
+    if (prev is not None and prev.key != preset.key
+            and after["total"] and after["count"] == 0
+            and before["count"] > 0):
+        if log:
+            log("warning", f"обход пропал после «{preset.title}» "
+                           f"({before['count']}/{before['total']} -> 0/"
+                           f"{after['total']}): откат на «{prev.title}»")
+        back = apply(prev, root, log=log)
+        res.update({"ok": False, "rolled_back": True,
+                    "error": "обход пропал после применения — возвращено "
+                             "прежнее состояние",
+                    "restore_preset": prev.key, "restore_ok": back.get("ok"),
+                    "before": before, "after": after})
+        return res
+    res.update({"before": before, "after": after})
+    return res
+
+
+def try_strategy(preset: Preset, root: Path, *, log=None, probe=None) -> dict:
+    """«Попробовать без применения»: поставить стратегию, проверить, вернуть.
+
+    Смысл в том, чтобы оценить рекомендацию перебора до того, как
+    пользователь согласится пересоздать службу. Результат - сравнение
+    before/after, а не обещание: прежнее состояние восстанавливается
+    обязательно, даже если пробы упали.
+    """
+    probe = probe or _quick_probe
+    previous = restore_target(root)
+    if previous is None:
+        return {"ok": False,
+                "error": "служба не установлена — применять нечего, "
+                         "сначала выберите пресет"}
+    if log:
+        log("info", f"проба стратегии {_label(preset.strategy)} без применения")
+
+    before = _summary(probe())
+    res = apply(preset, root, log=log)
+    if not res.get("ok"):
+        back = apply(previous, root, log=log)
+        return {"ok": False, "error": res.get("error"),
+                "restored": bool(back.get("ok")),
+                "restore_preset": previous.key}
+
+    after = _summary(probe())
+    back = apply(previous, root, log=log)
+    better = after["count"] > before["count"]
+    if log:
+        log("info", f"проба: {before['count']}/{before['total']} -> "
+                    f"{after['count']}/{after['total']}, возврат "
+                    f"{'ок' if back.get('ok') else 'не ок'}")
+    return {"ok": True, "trial": True, "better": better,
+            "before": before, "after": after,
+            "restored": bool(back.get("ok")),
+            "restore_preset": previous.key,
+            "restore_error": back.get("error")}
+
+
+# -- перенос связки «пресет + стратегия + списки» ----------------------------
+
+def export_bundle(preset: Preset) -> dict:
+    """Связка пресета в переносимом виде (для другой машины/версии)."""
+    return {"format": 1,
+            "key": preset.key, "title": preset.title,
+            "strategy": preset.strategy,
+            "game_filter": preset.game_filter, "ipset": preset.ipset,
+            "exclude_domains": list(preset.exclude_domains),
+            "general_domains": list(preset.general_domains),
+            "description": preset.description, "off": preset.off}
+
+
+def import_bundle(data: dict, root: Path | str, *,
+                  key: str | None = None) -> str:
+    """Добавить перенесённую связку как пользовательский пресет.
+
+    Возвращает ключ нового пресета. Стратегия проверяется по ЭТОЙ
+    установке: перенос связки из 1.10.x в 1.9.x не должен оставлять
+    ссылку на файл, которого нет (такая связка ложится на дефолт, и
+    пользователь меняет стратегию селектором).
+    """
+    from . import paths
+    if not isinstance(data, dict):
+        raise ValueError("ожидался словарь связки")
+    title = str(data.get("title") or "").strip()
+    if not title:
+        raise ValueError("в связке нет названия пресета")
+
+    base = slug_key(str(key or data.get("key") or "").strip() or title)
+    taken = {p.key for p in load_presets(root)}
+    new_key, suffix = base, 2
+    while new_key in taken:
+        new_key = f"{base}_{suffix}"
+        suffix += 1
+
+    strategy = str(data.get("strategy") or "")
+    files = available_strategies(root)
+    if strategy and strategy not in files:
+        # Связка перенесена из другой версии: чужой файл стратегии не
+        # записывается, иначе каждое применение падало бы «нет стратегии».
+        # Берётся первая стратегия этой установки - её всегда можно
+        # поменять селектором.
+        strategy = files[0] if files else ""
+    settings = paths.read_settings()
+
+    item = {"key": new_key, "title": title,
+            "strategy": strategy,
+            "game_filter": str(data.get("game_filter") or ""),
+            "ipset": str(data.get("ipset") or ""),
+            "exclude_domains": [str(d) for d in
+                                (data.get("exclude_domains") or ())],
+            "general_domains": [str(d) for d in
+                                (data.get("general_domains") or ())],
+            "description": str(data.get("description") or "")}
+    custom = [p for p in (settings.get("presets") or [])
+              if str(p.get("key")) != new_key]
+    custom.append(item)
+    settings["presets"] = custom
+    paths.write_settings(settings)
+    return new_key
+
+
+def slug_key(value: str) -> str:
+    """Ключ пресета: буквы/цифры/_/- ; всё остальное сворачивается в «_»."""
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", value.strip()).strip("_")
+    return cleaned or "custom"
+
