@@ -1,9 +1,17 @@
-"""Smoke-тест exe: запустить, дождаться окна, закрыть."""
+"""Smoke-тест exe: запустить, дождаться окна, закрыть.
+
+Путь к exe - аргумент, DIASPAS_EXE или dist/Diaspas.exe от корня проекта:
+скрипт не привязан к одному компьютеру и работает в CI.
+"""
+import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
-EXE = r"B:\projs\Diaspas\dist\Diaspas.exe"
+ROOT = Path(__file__).resolve().parents[1]
+_raw = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("DIASPAS_EXE")
+EXE = str(Path(_raw)) if _raw else str(ROOT / "dist" / "Diaspas.exe")
 
 FIND_WINDOW = r'''
 Add-Type @"

@@ -1,9 +1,15 @@
 """Почему proc.kill() не закрывает Diaspas.exe?"""
+import os
 import subprocess
-import sys
 import time
+from pathlib import Path
 
-EXE = r"B:\projs\Diaspas\dist\Diaspas.exe"
+from _guard import require_live
+
+EXE = Path(os.environ.get("DIASPAS_EXE")
+           or Path(__file__).resolve().parents[2] / "dist" / "Diaspas.exe")
+
+require_live(__doc__ or "прогон exe")
 
 if __name__ == "__main__":
     proc = subprocess.Popen([EXE])

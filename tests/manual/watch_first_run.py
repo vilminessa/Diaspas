@@ -3,12 +3,18 @@
 Запускает скачанный exe, ждёт окно и журнальные записи, затем закрывает
 деревом (onefile = bootstrap + приложение).
 """
+import os
 import subprocess
 import time
 from pathlib import Path
 
-EXE = Path.home() / "Downloads/Diaspas.exe"
+from _guard import require_live
+
+EXE = Path(os.environ.get("DIASPAS_EXE")
+           or Path.home() / "Downloads" / "Diaspas.exe")
 LOG = Path.home() / "AppData/Local/Diaspas/diaspas.log"
+
+require_live(__doc__ or "наблюдение за первым запуском")
 
 FIND_WINDOW = r'''
 Add-Type @"
