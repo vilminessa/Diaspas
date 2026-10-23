@@ -31,6 +31,8 @@ from .release import ReleaseError
 
 # Имя папки релиза Flowseal: zapret-discord-youtube-<tag>
 _VERSION_RE = re.compile(r"zapret-discord-youtube-(.+)$", re.IGNORECASE)
+# win-bundle: папка zipball - zapret-win-bundle-<tag> (мастер/ветка)
+_VERSION_RE_WINWS = re.compile(r"zapret-win-bundle-(.+)$", re.IGNORECASE)
 
 DEFAULT_KEEP = 3
 
@@ -44,6 +46,7 @@ class Install:
     added: int = 0
     last_used: int = 0
     source: str = "download"   # download | autodiscover | manual
+    layout: str = ""           # flowseal | winws (пусто - определить)
 
     @property
     def dir(self) -> Path:
@@ -56,9 +59,10 @@ def installs_file() -> Path:
 
 
 def version_of(path: Path) -> str:
-    """1.10.3 из имени папки zapret-discord-youtube-1.10.3."""
-    m = _VERSION_RE.search(Path(path).name)
-    return m.group(1) if m else Path(path).name
+    """1.10.3 из zapret-discord-youtube-1.10.3; master из win-bundle-master."""
+    name = Path(path).name
+    m = _VERSION_RE.search(name) or _VERSION_RE_WINWS.search(name)
+    return m.group(1) if m else name
 
 
 def load() -> dict:
@@ -121,17 +125,20 @@ def register(path, source: str = "download") -> Install:
     path = Path(path)
     data = load()
     now = int(time.time())
+    layout = detect_layout(path)["layout"] or ""
     for raw in data["items"]:
         if isinstance(raw, dict) and str(raw.get("path")) == str(path):
             raw["last_used"] = now
             raw["source"] = source
+            raw["layout"] = layout
             data["active"] = str(path)
             save(data)
             return Install(path=str(path), version=str(raw.get("version") or ""),
                            added=int(raw.get("added") or 0),
-                           last_used=now, source=source)
+                           last_used=now, source=source, layout=layout)
     entry = asdict(Install(path=str(path), version=version_of(path),
-                           added=now, last_used=now, source=source))
+                           added=now, last_used=now, source=source,
+                           layout=layout))
     data["items"].append(entry)
     data["active"] = str(path)
     save(data)
@@ -303,52 +310,125 @@ def set_keep(value: int) -> None:
     save(data)
 
 
+# -- layout установки ---------------------------------------------------------
+
+LAYOUT_FLOWSEAL = "flowseal"   # general*.bat + bin\winws.exe + lists\ (Flowseal)
+LAYOUT_WINWS = "winws"         # preset*.cmd + winws.exe рядом (bol-van win-bundle)
+
+
+def detect_layout(root: Path) -> dict:
+    """Какой layout у установки: flowseal (Flowseal) или winws (win-bundle).
+
+    Поиск winws.exe вглубь до 3 уровней (приём Synfronia _install_dirs):
+    в win-bundle он лежит рядом с preset*.cmd, в Flowseal - в bin\\. Стратегии
+    находятся относительно той же папки, где лежит winws.exe.
+    """
+    root = Path(root)
+    dirs: list[Path] = [root]
+    frontier = [root]
+    for _ in range(3):
+        nxt: list[Path] = []
+        for d in frontier:
+            try:
+                kids = [p for p in d.iterdir() if p.is_dir()][:25]
+            except OSError:
+                continue
+            for kid in kids:
+                if kid not in dirs:
+                    dirs.append(kid)
+                    nxt.append(kid)
+        frontier = nxt
+        if not frontier:
+            break
+
+    def collect(pattern: str) -> list[tuple[Path, str]]:
+        found: list[tuple[Path, str]] = []
+        for d in dirs:
+            try:
+                for f in sorted(d.glob(pattern)):
+                    if f.is_file():
+                        found.append((d, f.name))
+            except OSError:
+                continue
+        return found
+
+    bat = collect("general*.bat")
+    preset = collect("preset*.cmd")
+    winws_dir = next((d for d in dirs if (d / "winws.exe").is_file()), None)
+
+    if bat:
+        return {"layout": LAYOUT_FLOWSEAL,
+                "strategies": [name for _, name in bat],
+                "winws_dir": winws_dir,
+                "winws": str(winws_dir / "winws.exe") if winws_dir else ""}
+    if preset and winws_dir is not None:
+        return {"layout": LAYOUT_WINWS,
+                "strategies": [name for _, name in preset],
+                "winws_dir": winws_dir,
+                "winws": str(winws_dir / "winws.exe")}
+    return {"layout": None, "strategies": [], "winws_dir": None, "winws": ""}
+
+
 # -- целостность и ремонт ----------------------------------------------------
 
 def integrity(root: Path) -> list[str]:
     """Недостающие файлы установки - относительные пути вида BIN/winws.exe.
 
-    Проверяются самодостаточно (без реестра службы): winws.exe и все
-    файлы, на которые ссылаются стратегии через %BIN%/%LISTS%. Ровно
-    та проверка, что ловила 1067: winws отказывается стартовать без
-    обязательных hostlist-файлов и без фейков, на которые ссылается
-    --dpi-desync-fake-*.
+    Работает для обоих layout: flowseal (winws.exe в bin\\, списки в
+    lists\\) и winws (winws.exe рядом с preset*.cmd, файлы в files\\ и
+    windivert.filter\\). Ровно та проверка, что ловила 1067: winws
+    отказывается стартовать без файлов, на которые ссылаются стратегии.
     """
-    from . import batparser
+    from . import batparser, cmdparser
 
     root = Path(root)
+    info = detect_layout(root)
     missing: set[str] = set()
 
-    exe = root / "bin" / "winws.exe"
-    if not exe.is_file():
+    if info["layout"] is None:
+        missing.add("general*.bat|preset*.cmd")
+        return sorted(missing)
+    if not info["winws"]:
         missing.add("BIN/winws.exe")
 
-    strategies = [p.name for p in root.glob("general*.bat")]
-    if not strategies:
-        missing.add("general*.bat")
-        return sorted(missing)
-
-    for name in strategies:
-        # файлы из аргументов стратегии (списки, .bin-фейки)
+    def add_ref(ref: str) -> None:
+        p = Path(ref)
+        if p.is_file():
+            return
+        # *-user.txt создаёт service.bat при запуске менеджера -
+        # их отсутствие в свежей распаковке норма
+        if p.name.endswith("-user.txt"):
+            return
         try:
-            args = batparser.parse_strategy(root / name)
-        except batparser.BatParseError:
-            continue                      # битая стратегия - не её файлы ищем
-        # batparser оборачивает пути в \": regex обязан их видеть, иначе
-        # хвостовой \ попадает в путь и файл «не существует» всегда
-        for ref in re.findall(r'\\"([^"]+)\\"', args):
-            p = Path(ref)
-            if p.is_file():
-                continue
-            # *-user.txt создаёт service.bat при запуске менеджера -
-            # их отсутствие в свежей распаковке норма, winws дождётся
-            if p.name.endswith("-user.txt"):
-                continue
+            rel = p.relative_to(root)
+        except ValueError:
+            rel = p
+        missing.add(str(rel).replace("\\", "/"))
+
+    if info["layout"] == LAYOUT_FLOWSEAL:
+        for name in info["strategies"]:
             try:
-                rel = p.relative_to(root)
-            except ValueError:
+                args = batparser.parse_strategy(root / name)
+            except batparser.BatParseError:
+                continue                      # битая стратегия - не её файлы
+            # batparser оборачивает пути в \": regex обязан их видеть,
+            # иначе хвостовой \ попадает в путь и файл «не существует»
+            for ref in re.findall(r'\\"([^"]+)\\"', args):
+                add_ref(ref)
+    else:
+        winws_dir = info["winws_dir"] or root
+        for name in info["strategies"]:
+            try:
+                args = cmdparser.parse_preset(winws_dir / name)
+            except cmdparser.CmdParseError:
                 continue
-            missing.add(str(rel).replace("\\", "/"))
+            # %~dp0 уже раскрыт - берём только абсолютные пути: прочие
+            # кавычки в .cmd (start "zapret") - не файлы
+            for ref in re.findall(r'"([A-Za-z]:[^"]+)"', args):
+                add_ref(ref)
+            for token in args.split():
+                if token.startswith("@\""):
+                    add_ref(token[2:-1])
     return sorted(missing)
 
 

@@ -8,7 +8,6 @@
 - кэш лучшей стратегии - per-install, версии не подмешивают чужое.
 """
 
-import io
 import sys
 import zipfile
 from pathlib import Path

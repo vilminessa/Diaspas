@@ -252,6 +252,9 @@ select:focus { outline: none; border-color: var(--accent); }
 .preset-card .name { font-weight: 600; font-size: 14px; display: flex; justify-content: space-between; }
 .preset-card .name .mark { color: var(--accent); }
 .preset-card .desc { font-size: 12px; color: var(--muted); line-height: 1.35; }
+/* стратегия пресета: без неё «ALT11 на всё» выглядело неизменяемым */
+.preset-card .strat { font: 11px var(--mono); color: var(--faint); }
+.preset-card .strat.custom { color: var(--accent); }
 
 /* ── таблицы ───────────────────────────────────────────────── */
 .table-wrap { overflow-y: auto; max-height: 260px; border: 1px solid var(--border); border-radius: var(--radius-s); }

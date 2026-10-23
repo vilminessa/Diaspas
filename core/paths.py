@@ -52,14 +52,16 @@ def zapret_install_dir() -> Path | None:
 
 
 def is_zapret_dir(path: Path) -> bool:
-    """Папка пригодна: есть service.bat, bin и хотя бы одна стратегия."""
-    if not path.is_dir():
+    """Папка пригодна: любой поддерживаемый layout установки.
+
+    flowseal: service.bat + bin\\ + general*.bat; winws: winws.exe и
+    preset*.cmd рядом (bol-van zapret-win-bundle). detect_layout ищет
+    winws.exe вглубь, поэтому проверка одинаково ловит оба layout.
+    """
+    from . import installs   # лениво: installs тянет paths
+    if not Path(path).is_dir():
         return False
-    if not (path / "service.bat").is_file():
-        return False
-    if not (path / "bin").is_dir():
-        return False
-    return bool(strategy_files(path))
+    return installs.detect_layout(path)["layout"] is not None
 
 
 def strategy_files(root: Path) -> list[str]:
@@ -78,14 +80,27 @@ def strategy_files(root: Path) -> list[str]:
     return sorted(names, key=natural)
 
 
+def _strip_ext(name: str) -> str:
+    """Снять расширение стратегии: general*.bat и preset*.cmd равноправны.
+
+    Два layout установки дают два набора имён, а метка в реестре и короткая
+    метка в GUI обязаны сниматься одинаково - иначе win-bundle показывался бы
+    как «preset1_example.cmd».
+    """
+    lower = name.lower()
+    for ext in (".bat", ".cmd"):
+        if lower.endswith(ext):
+            return name[:-len(ext)]
+    return name
+
+
 def strategy_label(filename: str) -> str:
-    """general (ALT11).bat -> ALT11; general.bat -> general.
+    """general (ALT11).bat -> ALT11; general.bat -> general;
+    preset1_example.cmd -> preset1_example.
 
     Короткая метка для отображения в GUI.
     """
-    name = filename
-    if name.lower().endswith(".bat"):
-        name = name[:-4]
+    name = _strip_ext(filename)
     if name.lower().startswith("general"):
         name = name[7:].strip(" ()")
     return name or "general"
@@ -96,11 +111,9 @@ def strategy_stem(filename: str) -> str:
 
     Ровно то, что пишет service.bat (``%%~nF``) - храним так же, чтобы
     Diaspas читал установки, поставленные штатным менеджером, и наоборот.
+    Для win-bundle метка - имя ``preset*.cmd`` без расширения.
     """
-    name = filename
-    if name.lower().endswith(".bat"):
-        name = name[:-4]
-    return name
+    return _strip_ext(filename)
 
 
 def read_settings() -> dict:

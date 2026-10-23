@@ -19,6 +19,7 @@ import json
 import os
 import queue
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -29,6 +30,11 @@ from core import presets as presets_mod
 from core import probes, release, service
 from i18n import tr
 from ui.bundle import INDEX_HTML
+
+# Период фонового опроса службы: достаточно часто, чтобы смена стратегии
+# через service.bat или автозапуск после перезагрузки были замечены в UI
+# без ручного «Обновить», и достаточно редко, чтобы не грузить систему.
+_STATE_POLL_SECONDS = 5.0
 
 
 class Emitter:
@@ -79,6 +85,39 @@ class App:
         self._select_running = False
         # один warning о пропавшей службе на сессию - без спама в журнал
         self._warned_missing_service = False
+        # таймер background-обновления состояния (5 сек)
+        self._state_timer: threading.Timer | None = None
+        self._running = True  # флаг для остановки цикла
+        # один warning о дрейфе пресета на сессию
+        self._warned_drift = False
+
+    # -- background обновление состояния -------------------------------
+
+    def _refresh_state_loop(self) -> None:
+        """Периодически перечитывает состояние службы (раз в 5 сек).
+
+        Единственная точка обнаружения изменений, сделанных вне Diaspas
+        (service.bat, автозапуск после перезагрузки ПК): фронтенд получает
+        событие ``state`` без ручного «Обновить». Событие шлём только при
+        реальном изменении, чтобы не перерисовывать окно вхолостую.
+        """
+        last: dict | None = None
+        while self._running:
+            try:
+                data = self._collect_state()
+                if data != last:
+                    last = data
+                    self.emitter.emit("state", data)
+            except Exception:  # noqa: BLE001 - цикл не должен ронять нитку
+                dlog.exception("фоновое обновление состояния")
+            time.sleep(_STATE_POLL_SECONDS)
+
+    def _start_state_polling(self) -> None:
+        """Запустить background-обновление состояния."""
+        self._running = True
+        self._state_timer = threading.Timer(0, self._refresh_state_loop)
+        self._state_timer.daemon = True
+        self._state_timer.start()
 
     # -- журнал --------------------------------------------------------
 
@@ -133,12 +172,25 @@ class App:
     # -- состояние -----------------------------------------------------
 
     def state(self) -> dict:
-        st = service.state(log=self.log)
+        """Снимок состояния для фронтенда (по запросу или после операции)."""
+        return self._collect_state()
+
+    def _collect_state(self) -> dict:
+        """Собрать состояние службы и распознать активный пресет.
+
+        Побочные эффекты (по одному разу за сессию): предупреждение о
+        пропавшей службе и о дрейфе пресета - маркер `active_preset` есть,
+        но факт ему не отвечает (правки через service.bat, ручная чистка
+        или автозапуск после перезагрузки ПК).
+        """
+        st = service.state()
         current = None
+        # пресеты под активную папку: стратегия дефолта зависит от layout
+        presets = presets_mod.load_presets(self.zapret_root)
         if self.zapret_root is not None:
             try:
                 current = presets_mod.current_preset(
-                    self.zapret_root, st,
+                    self.zapret_root, st, presets=presets,
                     active_key=presets_mod.active_preset_key())
             except Exception:  # noqa: BLE001 - распознавание не валит статус
                 self.log("exception", "распознавание пресета")
@@ -158,34 +210,158 @@ class App:
                      "пресет не применён или служба удалена вне интерфейса "
                      "(service.bat / ручная чистка)")
 
+        active_key = presets_mod.active_preset_key()
+        # что предложить, если службы нет: последний применявшийся пресет
+        # (маркер), без маркера - последний известный при дрейфе, иначе
+        # базовый безопасный пресет. «Выкл» не кандидат: кнопка «Создать
+        # службу» должна службу создавать, а из off-пресета она упиралась
+        # бы в тост «выберите пресет» - цикл обрывался.
+        suggested = (active_key
+                     or presets_mod.last_known_preset_key() or "")
+        if suggested not in {p.key for p in presets if not p.off}:
+            suggested = next((p.key for p in presets if not p.off),
+                             "discord_youtube")
+        # Дрейф: служба стоит, маркер есть, но состояние разошлось. Факт
+        # важнее маркера - подсветка уйдёт в инференс/«не распознан», а
+        # последний известный пресет сохраним для восстановления одним
+        # нажатием (needs_restore ниже).
+        if (not self._warned_drift and st.installed
+                and active_key and active_key != "off" and current is None):
+            settings["last_known_preset"] = active_key
+            paths.write_settings(settings)
+            self.log("warning",
+                     f"дрейф пресета «{active_key}»: состояние не отвечает "
+                     f"маркеру - правки вне Diaspas (service.bat) или "
+                     f"автозапуск после перезагрузки")
+            self._warned_drift = True
+
         return {
             "installed": st.installed,
             "running": st.running,
             "start_type": st.start_type,
             "strategy": st.strategy,
+            # короткая метка фактической стратегии (ALT11, а не
+            # "general (ALT11)"): окно показывает то, что реально стоит
+            "strategy_label": self._strategy_label(st),
             "pid": st.pid,
             "dir_ok": dir_ok,
             "dir_source": self.zapret_source,
             "preset_key": current.key if current else None,
             "preset_title": current.title if current else None,
-            # что предложить, если службы нет: последний применявшийся
-            # пресет (маркер); без маркера - базовый, безопасный пресет
-            # (без игровых фильтров), чтобы цикл «скачал -> создал службу»
+            # что предложить, если службы нет: вычисленный выше рабочий
+            # пресет (без «Выкл»), чтобы цикл «скачал -> создал службу»
             # не зависел от наличия маркера в settings
-            "suggested_preset": (presets_mod.active_preset_key()
-                                 or "discord_youtube"),
+            "suggested_preset": suggested,
+            # служба работает, но пресет не распознан: предлагаем вернуть
+            # управление, применив последний известный пресет
+            "needs_restore": bool(st.running and not current
+                                  and self.zapret_root is not None),
             "zapret_dir": str(self.zapret_root) if self.zapret_root else None,
             "release_note": settings.get("zapret_release") or "",
         }
 
+    def _strategy_label(self, st: service.ServiceState) -> str:
+        """Короткая метка фактической стратегии службы."""
+        if not self.zapret_root or not st.strategy:
+            return ""
+        try:
+            name = presets_mod.current_strategy_file(self.zapret_root, st)
+        except Exception:  # noqa: BLE001 - метка не должна валить статус
+            name = ""
+        return paths.strategy_label(name or st.strategy)
+
     def presets(self) -> list[dict]:
+        """Пресеты с их стратегией: пользователь обязан видеть, что
+        применится, и иметь возможность поменять её у конкретного пресета.
+        """
         return [
             {"key": p.key, "title": p.title, "description": p.description,
-             "strategy": p.strategy, "game_filter": p.game_filter,
+             "strategy": p.strategy,
+             "strategy_label": paths.strategy_label(p.strategy)
+                               if p.strategy else "",
+             "overridden": bool(presets_mod.strategy_override(
+                 p.key, self.zapret_root)),
+             "game_filter": p.game_filter,
              "ipset": p.ipset, "exclude_domains": list(p.exclude_domains),
              "off": p.off}
-            for p in presets_mod.load_presets()
+            for p in presets_mod.load_presets(self.zapret_root)
         ]
+
+    def strategies(self) -> dict:
+        """Стратегии активной установки (для селектора).
+
+        flowseal: general*.bat; winws: preset*.cmd. Плюс привязка к цели:
+
+        * ``current_strategy`` - что ФАКТИЧЕСКИ стоит в службе (метка
+          реестра превращена в имя файла), а не обещание пресета;
+        * ``target_preset`` - пресет, к которому привяжется выбор: маркер
+          -> распознанный пресет -> подсказка. Без этой цепочки смена
+          стратегии была доступна только тем, у кого маркер уже есть, а
+          служба, поставленная service.bat, переключаться не давала.
+        """
+        root = self.zapret_root
+        if root is None:
+            return {"ok": False, "error": tr("err.no_dir")}
+        st = service.state()
+        presets = presets_mod.load_presets(root)
+        marker = presets_mod.active_preset_key()
+        try:
+            inferred = presets_mod.current_preset(root, st, presets=presets,
+                                                 active_key=marker)
+        except Exception:  # noqa: BLE001 - распознавание не валит селектор
+            inferred = None
+        target = (marker
+                  or (inferred.key if inferred else None)
+                  or presets_mod.last_known_preset_key()
+                  # службы нет / пресет не распознан: целимся в первый
+                  # рабочий пресет, иначе выбор стратегии вообще некуда
+                  or next((p.key for p in presets if not p.off), ""))
+        current = presets_mod.current_strategy_file(root, st)
+        preset_strategy = next(
+            (p.strategy for p in presets if p.key == target), "")
+        return {
+            "ok": True,
+            "layout": installs.detect_layout(root)["layout"] or "",
+            "items": presets_mod.available_strategies(root),
+            "active_preset": marker,
+            "target_preset": target,
+            # текущая стратегия активного пресета - что селектор подсветит
+            "preset_strategy": preset_strategy,
+            # факт: подсвечиваем его, иначе кнопка «Применить» висит на
+            # уже выбранном пункте и «текущее» выглядит врём
+            "current_strategy": current or preset_strategy,
+        }
+
+    def set_preset_strategy(self, key: str, strategy: str) -> dict:
+        """Выбрать стратегию для пресета (не применяя службу сразу).
+
+        Главный путь после автоподбора: «взять ALT7» = set + apply.
+        Файл сверяется с установкой до записи в настройки - битое имя не
+        должно остаться в settings и падать при каждом следующем
+        применении.
+        """
+        root = self.zapret_root
+        if root is None:
+            return {"ok": False, "error": tr("err.no_dir")}
+        preset = next((p for p in presets_mod.load_presets(root)
+                       if p.key == key), None)
+        if preset is None:
+            return {"ok": False, "error": f"пресет {key!r} не найден"}
+        if preset.off:
+            return {"ok": False,
+                    "error": "пресет «Выкл» стратегии не содержит - "
+                             "выберите рабочий пресет"}
+        files = presets_mod.available_strategies(root)
+        if strategy and strategy not in files:
+            return {"ok": False,
+                    "error": f"в установке нет стратегии {strategy} - "
+                             f"выберите одну из {len(files)} в списке"}
+        presets_mod.set_strategy(key, strategy or None, root)
+        self.log("info", f"стратегия пресета {key!r}: "
+                         f"{paths.strategy_label(strategy) if strategy else 'дефолт'}")
+        return {"ok": True, "strategy": strategy,
+                "strategy_label": paths.strategy_label(strategy)
+                                  if strategy else ""}
 
     # -- версии zapret ----------------------------------------------------
 
@@ -206,6 +382,8 @@ class App:
             "items": [
                 {"path": str(i.path), "version": i.version,
                  "source": i.source, "last_used": i.last_used,
+                 "layout": i.layout or installs.detect_layout(
+                     i.dir)["layout"] or "",
                  "active": str(i.path) == str(active),
                  "valid": installs.is_valid(i.path)}
                 for i in installs.items()
@@ -244,17 +422,23 @@ class App:
         self.zapret_root = Path(path)
         self.zapret_source = "settings"
 
-        # служба переустанавливается на новый путь текущим пресетом
+        # служба переустанавливается на новый путь текущим пресетом.
+        # Пресеты собираются для НОВОЙ папки: переопределения хранятся по
+        # установке, поэтому чужой выбор (ALT13 из 1.10.x) тут не сработает
+        # и не уронит переключение версии.
+        presets = presets_mod.load_presets(self.zapret_root)
         key = presets_mod.active_preset_key() or "discord_youtube"
-        res = presets_mod.apply(
-            next((p for p in presets_mod.load_presets() if p.key == key),
-                 None) or presets_mod.load_presets()[0],
-            self.zapret_root, log=self.log)
+        preset = next((p for p in presets if p.key == key), None)
+        if preset is None:
+            preset = next((p for p in presets if not p.off), presets[0])
+        # пресет off остаётся off: служба удаляется, а не молча включается,
+        # иначе «Выкл» превратилось бы в обход при смене версии
+        res = presets_mod.apply(preset, self.zapret_root, log=self.log)
         self.emitter.emit("state", self.state())
         if not res.get("ok"):
             return {"ok": False, "error": str(res.get("error")),
                     "rolled_back": False}
-        return {"ok": True, "applied": key,
+        return {"ok": True, "applied": preset.key,
                 "rollback": str(installs.rollback_path() or "")}
 
     def rollback_version(self) -> dict:
@@ -287,6 +471,41 @@ class App:
         return {"ok": True}
 
     # -- обновление и откат ------------------------------------------------
+
+    def available_releases(self) -> dict:
+        """Все версии обоих источников для скачивания.
+
+        Flowseal - реальные релизы с zip-ассетами; win-bundle - ветка
+        master (релизов нет). Списки кэшируются release-ом (TTL 900 с);
+        сетевая ошибка возвращает устаревший кэш с пометкой stale.
+        """
+        out: dict = {"ok": True, "repos": []}
+        for repo in release.REPOS:
+            try:
+                entries = release.releases(repo)
+            except release.ReleaseError as exc:
+                stale = release.releases(repo, offline=True)
+                out["repos"].append({
+                    "repo": repo, "error": str(exc),
+                    "entries": [e.__dict__ for e in stale], "stale": True})
+                continue
+            out["repos"].append({
+                "repo": repo, "entries": [e.__dict__ for e in entries],
+                "stale": False})
+        return out
+
+    def download_release(self, repo: str, tag: str) -> dict:
+        """Скачать и установить выбранную версию (рядом с текущими).
+
+        Путь общий с install_release: служба останавливается заранее,
+        версия попадает в реестр, предлагается пресет.
+        """
+        entry = release.release_by_tag(repo, tag)
+        if entry is None:
+            return {"ok": False,
+                    "error": f"версия {tag} не найдена в списке (кэш "
+                             f"устарел?) - обновите список"}
+        return self._install_release_entry(entry)
 
     def check_update(self) -> dict:
         """Есть ли релиз новее активной версии (сеть требуется)."""
@@ -349,10 +568,12 @@ class App:
         self.zapret_source = "settings"
 
         key = presets_mod.active_preset_key() or "discord_youtube"
-        preset = next((p for p in presets_mod.load_presets()
-                       if p.key == key), None)
-        if preset is None:
-            preset = presets_mod.load_presets()[0]
+        presets = presets_mod.load_presets(root)
+        preset = next((p for p in presets if p.key == key), None)
+        if preset is None or preset.off:
+            # пресет под новую папку: переопределений прежней версии тут
+            # нет, а без обхода проверка обновления бессмысленна
+            preset = next((p for p in presets if not p.off), presets[0])
         res = presets_mod.apply(preset, root, log=self.log)
         if not res.get("ok"):
             self._rollback_after_update(prev)
@@ -425,14 +646,28 @@ class App:
 
     # -- операции ------------------------------------------------------
 
-    def apply_preset(self, key: str) -> dict:
-        preset = next((p for p in presets_mod.load_presets()
+    def apply_preset(self, key: str, strategy: str | None = None) -> dict:
+        """Применить пресет; strategy - переопределение его стратегии.
+
+        Стратегия сохраняется в настройках ЭТОЙ установки (маркер/инференс/
+        установка службы сходятся), затем пресет применяется как обычно.
+        При неудаче переопределение остаётся: это выбор пользователя, а не
+        состояние службы, и следующий «Применить» обязан использовать его.
+        """
+        if self.zapret_root is None:
+            return {"ok": False, "error": tr("err.no_dir")}
+        if strategy:
+            res = self.set_preset_strategy(key, strategy)
+            if not res.get("ok"):
+                return res
+        preset = next((p for p in presets_mod.load_presets(self.zapret_root)
                        if p.key == key), None)
         if preset is None:
             return {"ok": False, "error": f"пресет {key!r} не найден"}
-        if self.zapret_root is None:
-            return {"ok": False, "error": tr("err.no_dir")}
-        self.log("info", f"применение пресета {preset.title!r}")
+        # стратегия в журнале: без неё все применения выглядели как ALT11
+        self.log("info", f"применение пресета {preset.title!r}"
+                         + ("" if preset.off
+                            else f" ({paths.strategy_label(preset.strategy)})"))
         if not service.task_exists():
             # окно UAC появится неожиданно - предупредить заранее
             self.log("info", tr("uac.incoming"))
@@ -495,8 +730,22 @@ class App:
         return {"ok": True}
 
     def install_release(self) -> dict:
+        """Установить последний релиз основного источника (Flowseal)."""
         self.log("info", "установка: запрос последнего релиза")
+        try:
+            rel = release.latest_release()
+        except release.ReleaseError as exc:
+            self.log("error", f"установка: {exc}")
+            return {"ok": False, "error": str(exc)}
+        return self._install_release_entry(rel)
 
+    def _install_release_entry(self, rel: release.Release) -> dict:
+        """Общий путь установки выбранной версии (и последней, и любой).
+
+        Версия ставится рядом с соседями, попадает в реестр (прежняя
+        активная становится точкой отката); дальше фронт замыкает цикл:
+        пресет создаёт службу.
+        """
         def progress(done: int, total: int | None) -> None:
             if total:
                 self.emitter.emit("toast",
@@ -504,8 +753,7 @@ class App:
                                            f"({done // 1024}/{total // 1024} КБ)"})
 
         try:
-            rel = release.latest_release()
-            self.log("info", f"релиз {rel.tag} ({rel.published})")
+            self.log("info", f"релиз {rel.title} ({rel.published or 'ветка'})")
             # переустановка своей версии: работающий winws держит exe и
             # не даёт заменить папку - служба останавливается заранее
             if service.state().installed:
@@ -513,11 +761,19 @@ class App:
                 service.stop(log=self.log)
             zip_path = release.download(rel, progress=progress)
             dest = paths.app_dir() / "zapret"
-            root = release.install(zip_path, dest, progress=progress)
+            # zipball ветки распаковывается в <repo>-<sha> (хэш меняется) -
+            # даём стабильное имя zapret-<repo>-<tag>
+            name = (f"zapret-{rel.short_repo}-{rel.tag}"
+                    if rel.branch else "")
+            root = release.install(zip_path, dest, repo=rel.repo,
+                                   progress=progress, name=name)
             # служба стартует только при наличии пользовательских списков -
             # service.bat их создаёт при каждом запуске менеджера, а мы
-            # распаковываем «чистый» релиз
-            presets_mod.ensure_user_lists(root)
+            # распаковываем «чистый» релиз; у winws-layout списков нет
+            from core import installs as _installs
+            if _installs.detect_layout(root)["layout"] != \
+                    _installs.LAYOUT_WINWS:
+                presets_mod.ensure_user_lists(root)
             settings = paths.read_settings()
             settings["zapret_dir"] = str(root)
             settings["zapret_release"] = rel.tag
@@ -540,13 +796,21 @@ class App:
                       "stale": [{"path": s.path, "version": s.version}
                                 for s in installs.prune()]}
             if needs_preset:
-                key = presets_mod.active_preset_key() or "discord_youtube"
-                result["active_preset"] = key
-                title = next(
-                    (p.title for p in presets_mod.load_presets()
-                     if p.key == key), key)
-                self.log("info",
-                         f"служба не создана - предлагаю пресет «{title}»")
+                # какой пресет предложить: маркер, но не «Выкл» - служба
+                # из off-пресета не создаётся, и кнопка упиралась бы в тост
+                presets = presets_mod.load_presets(root)
+                key = presets_mod.active_preset_key()
+                preset = next((p for p in presets
+                               if p.key == key and not p.off), None)
+                if preset is None:
+                    preset = next((p for p in presets if not p.off),
+                                  presets[0])
+                result["active_preset"] = preset.key
+                result["active_strategy"] = paths.strategy_label(
+                    preset.strategy)
+                self.log("info", f"служба не создана - предлагаю пресет "
+                                 f"«{preset.title}» "
+                                 f"({result['active_strategy']})")
             return result
         except release.ReleaseError as exc:
             self.log("error", f"установка: {exc}")
@@ -597,11 +861,18 @@ class App:
             self.log("error", f"открыть журнал: {exc}")
             return {"ok": False, "error": str(exc)}
 
+    def stop(self) -> None:
+        """Погасить фоновый опрос состояния (поток-демон завершится сам)."""
+        self._running = False
+
 
 def run() -> int:
     """Создать окно и отдать управление pywebview."""
     app = App()
     app.log("info", "запуск интерфейса (webview)")
+
+    # Запускаем background-обновление состояния сразу при старте
+    app._start_state_polling()
 
     def guard(fn):
         """Обёртка api-метода: каждая ошибка становится журналом (с
@@ -626,6 +897,8 @@ def run() -> int:
     api.prepare_privileges = guard(app.prepare_privileges)
     api.register_task_now = guard(app.register_task_now)
     api.state = guard(app.state)
+    api.strategies = guard(app.strategies)
+    api.set_preset_strategy = guard(app.set_preset_strategy)
     api.versions = guard(app.versions)
     api.switch_version = guard(app.switch_version)
     api.rollback_version = guard(app.rollback_version)
@@ -656,10 +929,20 @@ def run() -> int:
         text_select=True,
     )
     app.emitter.bind(win)
+
+    # Закрытие окна останавливает background-обновление (None - не
+    # отменяем закрытие, просто гасим цикл)
+    def on_closing():
+        app.stop()
+
+    win.events.closing += on_closing
+
     # хвост журнала прошлого запуска - сразу в окно, до первого вызова JS
     for line in dlog.tail(60):
         app.emitter.emit("log", line)
 
     webview.start(debug=False)
     app.log("info", "интерфейс закрыт")
+    # Погасить фоновый опрос (поток-демон всё равно умрёт вместе с процессом)
+    app.stop()
     return 0

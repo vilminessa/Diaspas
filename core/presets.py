@@ -11,13 +11,19 @@
 
 Применение пресета идёт по шагам без прав (запись файлов - пользовательские
 списки), а пересоздание службы уходит в service.run_action с UAC-обходом.
+
+Стратегия - не константа пресета: ``set_strategy`` сохраняет выбор
+пользователя, а дефолт разрешается под layout папки (``general*.bat`` во
+Flowseal, ``preset*.cmd`` в win-bundle). Переопределения хранятся ПО
+УСТАНОВКЕ: наборы стратегий у версий zapret разные, и выбор ALT13 в 1.10.x
+не должен ломать применение в 1.9.x, где такого файла нет.
 """
 
 from __future__ import annotations
 
 import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import batparser, service
@@ -103,26 +109,190 @@ DEFAULT_PRESETS: tuple[Preset, ...] = (
 )
 
 
-def load_presets() -> list[Preset]:
-    """Пресеты по умолчанию + пользовательские из настроек (если есть)."""
+# -- переопределение стратегии: выбор пользователя по установке ----------
+
+def _root_key(root: Path | str | None) -> str:
+    return str(Path(root)) if root is not None else ""
+
+
+def _split_overrides(raw) -> tuple[dict, dict]:
+    """Разделить переопределения на «по установке» и плоское наследие.
+
+    Новый вид - ``{путь установки: {ключ пресета: файл}}``. Плоский
+    ``{ключ: файл}`` остался от одноверсионности: он перекрывал все
+    установки сразу, поэтому выбор ALT13 в 1.10.x ломал применение в
+    версии, где такого файла нет. Плоские записи читаются как
+    «для любой установки», но вытесняются явным выбором по пути.
+    """
+    nested: dict[str, dict] = {}
+    legacy: dict[str, str] = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            if isinstance(value, dict):
+                nested[str(key)] = {str(k): str(v)
+                                    for k, v in value.items() if v}
+            elif value:
+                legacy[str(key)] = str(value)
+    return nested, legacy
+
+
+def _override_map(settings: dict, root: str = "") -> dict[str, str]:
+    """Что перекрыть для этой установки: наследие + запись по пути."""
+    nested, legacy = _split_overrides(settings.get("preset_strategies"))
+    out = dict(legacy)
+    if root:
+        out.update(nested.get(root) or {})
+    elif nested:
+        out.update(next(iter(nested.values()), {}))
+    return out
+
+
+def available_strategies(root: Path | str) -> list[str]:
+    """Файлы стратегий установки в порядке меню service.bat.
+
+    flowseal - ``general*.bat`` в корне, winws - ``preset*.cmd`` рядом с
+    winws.exe. Единая точка для UI, валидации и применения: иначе каждый
+    вызывающий сам гадает, какой layout у папки.
+    """
+    from . import cmdparser, installs, paths
+    root = Path(root)
+    info = installs.detect_layout(root)
+    if info["layout"] == installs.LAYOUT_WINWS:
+        winws_dir = info["winws_dir"] or root
+        return (cmdparser.preset_files(winws_dir)
+                or cmdparser.preset_files(root)
+                or list(info["strategies"]))
+    return paths.strategy_files(root)
+
+
+def _layout_default(root: Path | str | None, strategy: str) -> str:
+    """Разрешить стратегию под layout папки.
+
+    Пресеты описаны для flowseal (``general (ALT11).bat``), а в win-bundle
+    своих ``general*.bat`` нет - аргументы задаёт ``preset*.cmd``. Без
+    подстановки первое же применение падало бы «нет стратегии», и
+    переключать было бы нечего.
+    """
+    from . import installs
+    if not strategy or root is None:
+        return strategy
+    root_path = Path(root)
+    info = installs.detect_layout(root_path)
+    if info["layout"] != installs.LAYOUT_WINWS:
+        return strategy
+    winws_dir = info["winws_dir"] or root_path
+    if (winws_dir / strategy).is_file():
+        return strategy
+    names = available_strategies(root_path)
+    return names[0] if names else strategy
+
+
+def _with_strategy(preset: Preset, override: str,
+                   root: Path | str | None) -> Preset:
+    """Пресет со стратегией: переопределение > дефолт, плюс layout-разрешение.
+
+    Пресет с переопределённой стратегией участвует в маркере и инференсе
+    как обычный (``Preset.strategy`` везде сравнивается), поэтому подсветка
+    и установка службы сходятся.
+    """
+    if preset.off:
+        return preset
+    return replace(preset,
+                   strategy=_layout_default(root, override or preset.strategy))
+
+
+def load_presets(root: Path | str | None = None) -> list[Preset]:
+    """Пресеты по умолчанию + переопределения + пользовательские.
+
+    ``root`` - папка установки, для которой собираются стратегии
+    (по умолчанию - активная). Без неё переопределения «по установке» не
+    найти, и вернулся бы дефолт.
+    """
     from . import paths
-    custom = paths.read_settings().get("presets") or []
-    presets: list[Preset] = list(DEFAULT_PRESETS)
+    if root is None:
+        root = paths.zapret_dir_info()[0]
+    settings = paths.read_settings()
+    overrides = _override_map(settings, _root_key(root))
+
+    presets: list[Preset] = []
+    for preset in DEFAULT_PRESETS:
+        presets.append(_with_strategy(preset, overrides.get(preset.key, ""),
+                                      root))
+
+    custom = settings.get("presets") or []
     for item in custom:
         try:
-            presets.append(Preset(
-                key=str(item["key"]),
+            key = str(item["key"])
+            strategy = str(item.get("strategy") or "")
+            presets.append(_with_strategy(Preset(
+                key=key,
                 title=str(item["title"]),
-                strategy=str(item.get("strategy") or ""),
+                strategy=strategy,
                 game_filter=str(item.get("game_filter") or ""),
                 ipset=str(item.get("ipset") or ""),
                 exclude_domains=tuple(item.get("exclude_domains") or ()),
                 general_domains=tuple(item.get("general_domains") or ()),
                 description=str(item.get("description") or ""),
-            ))
+            ), overrides.get(key, ""), root))
         except (KeyError, TypeError):
             continue
     return presets
+
+
+def strategy_override(key: str, root: Path | str | None = None) -> str:
+    """Переопределённая стратегия пресета (пусто - дефолт)."""
+    from . import paths
+    if root is None:
+        root = paths.zapret_dir_info()[0]
+    return _override_map(paths.read_settings(), _root_key(root)).get(key, "")
+
+
+def set_strategy(key: str, strategy: str | None,
+                 root: Path | str | None = None) -> None:
+    """Выбрать стратегию для пресета в этой установке (None - вернуть дефолт).
+
+    Главная кнопка после автоподбора: «взять ALT7» = set_strategy(key,
+    "general (ALT7).bat", root). Файл должен существовать в установке -
+    проверка на стороне вызывающего (``apply`` всё равно сверится).
+    Явный выбор снимает плоское наследие этого пресета, иначе сброс
+    «вернуть дефолт» возвращал бы старую глобальную запись.
+    """
+    from . import paths
+    if root is None:
+        root = paths.zapret_dir_info()[0]
+    path = _root_key(root)
+    settings = paths.read_settings()
+    nested, legacy = _split_overrides(settings.get("preset_strategies"))
+    if path:
+        bucket = nested.setdefault(path, {})
+        if strategy:
+            bucket[key] = str(strategy)
+        else:
+            bucket.pop(key, None)
+        # Сброс «вернуть дефолт» обязан убирать и плоское наследие: без
+        # этого выбор по установке выглядел бы сброшенным, а применялась
+        # бы старая глобальная запись.
+        legacy.pop(key, None)
+    elif strategy:
+        # Установки нет (папка не найдена): выбор ложится плоско и его
+        # нельзя сносить тем же pop'ом - иначе запись теряется в тот же
+        # вызов, и переключение стратегии молча возвращается в дефолт.
+        legacy[key] = str(strategy)
+    else:
+        legacy.pop(key, None)
+    nested = {k: v for k, v in nested.items() if v}
+    settings["preset_strategies"] = {**legacy, **nested}
+    paths.write_settings(settings)
+
+
+def current_strategy_file(root: Path, state: service.ServiceState) -> str:
+    """Имя файла стратегии, которая реально стоит в службе ("" - неясно).
+
+    UI обязан показывать факт, а не обещание пресета: иначе селектор
+    подсвечивает то, что Diaspas *хотел* поставить, и «Применить»
+    появляется на уже выбранном пункте.
+    """
+    return _snapshot(Path(root), state).strategy_file
 
 
 # -- запись состояния в установку zapret -----------------------------------
@@ -208,7 +378,29 @@ def _merge_domains(path: Path, domains: tuple[str, ...]) -> None:
 
 
 def apply_files(root: Path, preset: Preset) -> None:
-    """Всё, что можно сделать без прав: флаги, ipset, пользовательские списки."""
+    """Всё, что можно сделать без прав: флаги, ipset, пользовательские списки.
+
+    Для winws-layout (bol-van win-bundle) файловой структуры нет:
+    ни lists\\ с user-списками, ни флагов Game Filter/IPSet - winws
+    работает только по аргументам preset*.cmd.
+    """
+    from . import installs
+    root = Path(root)
+    layout = installs.detect_layout(root)["layout"]
+
+    if layout == installs.LAYOUT_WINWS:
+        if not preset.off:
+            # стратегия winws-layout - файл preset*.cmd, а не general*.bat
+            info = installs.detect_layout(root)
+            winws_dir = info["winws_dir"] or root
+            if preset.strategy and not (winws_dir / preset.strategy).is_file():
+                names = ", ".join(available_strategies(root)) or "нет ни одной"
+                raise FileNotFoundError(
+                    f"в win-bundle установке нет {preset.strategy}: аргументы "
+                    f"winws задают preset*.cmd; доступны: {names} - "
+                    f"выберите стратегию в селекторе")
+        return
+
     ensure_user_lists(root)   # до всего: без них winws не стартует
     if not preset.off:
         if preset.strategy and not (root / preset.strategy).is_file():
@@ -243,14 +435,31 @@ def apply(preset: Preset, root: Path, log=None) -> dict:
     tcp = "1024-65535" if gf in ("all", "tcp") else "12"
     udp = "1024-65535" if gf in ("all", "udp") else "12"
 
-    if log:
-        log("info", f"пересоздание службы: {preset.strategy}")
-    try:
-        binpath = batparser.winws_command(root, preset.strategy, tcp, udp)
-    except batparser.BatParseError as exc:
+    from . import installs
+    from . import cmdparser
+    info = installs.detect_layout(root)
+    if info["layout"] == installs.LAYOUT_WINWS:
+        # winws-layout: winws.exe рядом с preset*.cmd, аргументы из него
+        winws_dir = info["winws_dir"] or Path(root)
         if log:
-            log("error", str(exc))
-        return {"ok": False, "error": str(exc)}
+            log("info", f"пересоздание службы (winws-layout): "
+                        f"{preset.strategy}")
+        try:
+            args = cmdparser.parse_preset(winws_dir / preset.strategy)
+        except cmdparser.CmdParseError as exc:
+            if log:
+                log("error", str(exc))
+            return {"ok": False, "error": str(exc)}
+        binpath = f'"{winws_dir / "winws.exe"}" {args}'
+    else:
+        if log:
+            log("info", f"пересоздание службы: {preset.strategy}")
+        try:
+            binpath = batparser.winws_command(root, preset.strategy, tcp, udp)
+        except batparser.BatParseError as exc:
+            if log:
+                log("error", str(exc))
+            return {"ok": False, "error": str(exc)}
 
     label = _label(preset.strategy)
     res = service.install_strategy(binpath, label, log=log)
@@ -301,10 +510,15 @@ def _finish(preset: Preset, res: dict, log=None) -> dict:
 
 
 def _remember_active(key: str) -> None:
-    """Сохранить ключ активного пресета в настройки."""
+    """Сохранить ключ активного пресета в настройки.
+
+    Успешное применение снимает дрейф: ``last_known_preset`` больше не
+    нужен, маркер снова совпадает с фактом.
+    """
     from . import paths
     settings = paths.read_settings()
     settings["active_preset"] = key
+    settings.pop("last_known_preset", None)
     paths.write_settings(settings)
 
 
@@ -312,6 +526,18 @@ def active_preset_key() -> str | None:
     """Ключ пресета, применённого через Diaspas (None - неизвестно)."""
     from . import paths
     key = paths.read_settings().get("active_preset")
+    return str(key) if key else None
+
+
+def last_known_preset_key() -> str | None:
+    """Последний известный пресет при дрейфе состояния.
+
+    Запоминается, когда маркер не совпадает с фактом (например, после
+    переключения стратегии через service.bat или автозапуска Windows).
+    Используется как подсказка при восстановлении управления.
+    """
+    from . import paths
+    key = paths.read_settings().get("last_known_preset")
     return str(key) if key else None
 
 
@@ -323,18 +549,29 @@ class _Snapshot:
     game_filter: str
     ipset: str
     excludes: frozenset[str]
+    layout: str = ""
 
 
 def _snapshot(root: Path, state: service.ServiceState) -> _Snapshot:
     """Снимок состояния установки: стратегия из метки реестра + файлы."""
     root_path = Path(root)
     from .paths import strategy_stem
+    from . import installs
+
+    layout = installs.detect_layout(root_path)["layout"] or ""
 
     strategy_file = ""
-    for name in _strategy_names(root):
+    for name in _strategy_names(root_path):
         if strategy_stem(name) == state.strategy:
             strategy_file = name
             break
+    if not strategy_file and layout == installs.LAYOUT_WINWS:
+        # winws-layout: стратегии - preset*.cmd (лежат рядом с winws.exe,
+        # не обязательно в корне), метка реестра = имя файла
+        for name in available_strategies(root_path):
+            if name == state.strategy or strategy_stem(name) == state.strategy:
+                strategy_file = name
+                break
 
     gf_flag = root_path / "utils" / "game_filter.enabled"
     game_filter = ""
@@ -363,13 +600,18 @@ def _snapshot(root: Path, state: service.ServiceState) -> _Snapshot:
                 excludes.add(line.lower())
 
     return _Snapshot(strategy_file=strategy_file, game_filter=game_filter,
-                     ipset=ipset, excludes=frozenset(excludes))
+                     ipset=ipset, excludes=frozenset(excludes),
+                     layout=layout)
 
 
 def _matches(preset: Preset, snap: _Snapshot) -> bool:
     """Сигнара пресета (то, что он обещает) содержится в снимке."""
     if preset.off:
         return False   # off проверяется отдельно - по факту службы
+    if snap.layout == "winws":
+        # winws-layout: флагов Game Filter/IPSet и user-списков нет -
+        # сравниваем только стратегию (файл preset*.cmd)
+        return preset.strategy == snap.strategy_file
     if preset.strategy != snap.strategy_file:
         return False
     wanted_gf = preset.game_filter if preset.game_filter in (
@@ -390,16 +632,19 @@ def current_preset(root: Path | None, state: service.ServiceState,
     применяли) - но только если его ожидания всё ещё выполняются;
     если состояние разошлось (правки через service.bat), маркер
     игнорируется и работает прежний инференс по снимку.
+
+    ``None`` при наличии маркера = дрейф: вызывающая сторона (GUI)
+    запоминает последний известный пресет, чтобы вернуть управление.
     """
     if not state.installed and not state.running:
-        for preset in (presets or load_presets()):
+        for preset in (presets or load_presets(root)):
             if preset.off:
                 return preset
         return None
     if root is None or not state.strategy:
         return None
 
-    all_presets = presets or load_presets()
+    all_presets = presets or load_presets(root)
     snap = _snapshot(root, state)
 
     # 1. маркер: применённый Diaspas'ом пресет, чьи ожидания совпали

@@ -70,6 +70,42 @@
             <button id="btn-pick-dir" class="btn">Указать папку…</button>
             <button id="btn-install" class="btn primary">Скачать последний релиз</button>
             <button id="btn-create-service" class="btn primary hidden">Создать службу</button>
+            <button id="btn-restore-after-restart" class="btn primary hidden">Восстановить после перезапуска</button>
+          </div>
+
+          <!-- выбор конкретной стратегии: результат перебора должен
+               применяться, а не только отображаться. Целевой пресет
+               выбирается явно - без него стратегия привязывалась только
+               к маркеру, и служба, поставленная service.bat, не
+               переключалась вовсе -->
+          <div class="version-row">
+            <label class="field">стратегия
+              <select id="strategy-select"></select>
+            </label>
+            <label class="field">для пресета
+              <select id="strategy-preset"></select>
+            </label>
+            <button id="btn-apply-strategy" class="btn hidden">Применить стратегию</button>
+            <button id="btn-save-strategy" class="btn hidden">Запомнить</button>
+            <span class="mono muted" id="strategy-current"></span>
+            <span class="mono muted" id="strategy-layout"></span>
+          </div>
+
+          <!-- скачивание любой доступной версии из обоих источников -->
+          <div class="btn-row">
+            <label class="field">источник
+              <select id="release-repo"></select>
+            </label>
+            <button id="btn-list-releases" class="btn">Показать версии</button>
+          </div>
+          <div class="table-wrap">
+            <table class="table" id="release-table">
+              <thead><tr><th>Версия</th><th>Дата</th><th>Размер</th>
+                <th></th></tr></thead>
+              <tbody><tr><td colspan="4" class="muted">
+                нажмите «Показать версии» — список придёт с GitHub
+              </td></tr></tbody>
+            </table>
           </div>
           <div id="release-note" class="note muted"></div>
         </div>
@@ -133,6 +169,7 @@
       <div class="btn-row">
         <button id="btn-select" class="btn primary">Перебрать стратегии</button>
         <button id="btn-select-cancel" class="btn danger" disabled>Прервать</button>
+        <button id="btn-take-best" class="btn hidden">★ Взять лучшую</button>
         <span id="select-progress" class="mono muted"></span>
       </div>
       <div class="progress"><div id="select-bar" class="progress-fill" style="width:0%"></div></div>

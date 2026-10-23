@@ -1,12 +1,16 @@
-"""Скачивание релизов zapret-discord-youtube с GitHub.
+"""Скачивание версий zapret с GitHub: два источника, любая версия.
 
-Diaspas сам не распространяет бинарники: zip берётся напрямую с релизов
-оригинального проекта, распаковывается в папку пользователя, и рядом
-оказывается LICENSE.txt из архива - условия MIT выполняются без нашего
-участия.
+Источники (приём Synfronia):
+* Flowseal/zapret-discord-youtube - релизы с zip-ассетами (layout
+  flowseal: general*.bat + bin\\winws.exe);
+* bol-van/zapret-win-bundle - релизов нет, ветка master через
+  zipball/master (layout winws: preset*.cmd + winws.exe рядом).
 
-Используется только стандартная библиотека (urllib), чтобы не тянуть
-зависимости в приложение, которое в основном про Tkinter.
+Diaspas сам не распространяет бинарники: zip берётся напрямую с
+репозиториев авторов, распаковывается в папку пользователя, и рядом
+оказывается LICENSE.txt - условия MIT выполняются без нашего участия.
+
+Используется только стандартная библиотека (urllib).
 """
 
 from __future__ import annotations
@@ -22,10 +26,23 @@ from urllib.request import Request, urlopen
 
 from . import paths
 
-API_RELEASES = (f"https://api.github.com/repos/{paths.ZAPRET_OWNER}/"
-                f"{paths.ZAPRET_REPO}/releases/latest")
+REPO_FLOWSEAL = "Flowseal/zapret-discord-youtube"
+REPO_WINWS = "bol-van/zapret-win-bundle"
+REPOS = (REPO_FLOWSEAL, REPO_WINWS)
+
+# LICENSE каждого источника: у win-bundle файла нет - берём MIT оригинала
+# bol-van (автора winws и win-bundle)
+_LICENSE_URLS = {
+    REPO_FLOWSEAL: ("https://raw.githubusercontent.com/"
+                    "Flowseal/zapret-discord-youtube/main/LICENSE.txt"),
+    REPO_WINWS: ("https://raw.githubusercontent.com/"
+                 "bol-van/zapret/master/docs/LICENSE.txt"),
+}
+
 _USER_AGENT = "Diaspas-release-check"
 _TIMEOUT = 30
+# кэш списка релизов: у GitHub лимит 60 запросов/час для анонимусов
+RELEASES_TTL = 900
 
 
 class ReleaseError(RuntimeError):
@@ -34,17 +51,26 @@ class ReleaseError(RuntimeError):
 
 @dataclass(frozen=True)
 class Release:
+    repo: str
     tag: str
     name: str
     zip_url: str
-    published: str
+    size: int = 0
+    published: str = ""
+    # master: ветка zipball вместо релиза (у win-bundle релизов нет)
+    branch: bool = False
 
     @property
-    def size_hint(self) -> str:
-        return self.tag
+    def short_repo(self) -> str:
+        return self.repo.split("/")[-1]
+
+    @property
+    def title(self) -> str:
+        return f"{self.short_repo} {self.tag}"
 
 
-def _api_get(url: str) -> dict:
+def _api_get(url: str):
+    """GET к API; возвращает dict ИЛИ list (releases - список)."""
     request = Request(url, headers={
         "User-Agent": _USER_AGENT,
         "Accept": "application/vnd.github+json",
@@ -66,34 +92,116 @@ def _api_get(url: str) -> dict:
         raise ReleaseError("GitHub вернул не JSON") from exc
 
 
-def latest_release() -> Release:
-    """Последний релиз репозитория запрета."""
-    data = _api_get(API_RELEASES)
-    zip_url = ""
-    for asset in data.get("assets") or []:
-        name = str(asset.get("name") or "")
-        if name.lower().endswith(".zip"):
-            zip_url = str(asset.get("browser_download_url") or "")
-            break
-    if not zip_url:
-        raise ReleaseError("в последнем релизе нет zip-вложения")
-    return Release(
-        tag=str(data.get("tag_name") or "?"),
-        name=str(data.get("name") or data.get("tag_name") or "?"),
-        zip_url=zip_url,
-        published=str(data.get("published_at") or ""),
-    )
+def _cache_path():
+    return paths.app_dir() / "github_releases.json"
+
+
+def _release_entries(payload, repo: str) -> list[Release]:
+    """Список релизов: только zip-ассеты; нет релизов -> ветка master.
+
+    win-bundle не публикует релизы, поэтому его список - это всегда
+    zipball/master (приём Synfronia: «у этого репо релизов нет, качаем
+    архив ветки»).
+    """
+    entries: list[Release] = []
+    for rel in payload if isinstance(payload, list) else []:
+        assets = [a for a in (rel.get("assets") or [])
+                  if str(a.get("name", "")).lower().endswith(".zip")]
+        asset = assets[0] if assets else {}
+        if not asset.get("browser_download_url"):
+            continue
+        entries.append(Release(
+            repo=repo,
+            tag=str(rel.get("tag_name") or ""),
+            name=str(rel.get("name") or rel.get("tag_name") or ""),
+            zip_url=str(asset["browser_download_url"]),
+            size=int(asset.get("size") or 0),
+            published=str(rel.get("published_at") or ""),
+        ))
+    if not entries:
+        entries.append(Release(
+            repo=repo, tag="master", name="master (ветка)",
+            zip_url=(f"https://api.github.com/repos/{repo}"
+                     f"/zipball/master"),
+            size=0, branch=True))
+    return entries
+
+
+def releases(repo: str = REPO_FLOWSEAL, offline: bool = False) -> list[Release]:
+    """Все версии репозитория (новые сверху); кэш живёт RELEASES_TTL.
+
+    offline=True - только кэш (для сетевой ошибки возвращаем устаревший
+    список с пометкой через кэш, а не падаем - приём Synfronia).
+    """
+    if repo not in REPOS:
+        raise ReleaseError(f"неизвестный источник: {repo}")
+    cache = None
+    try:
+        cache = json.loads(_cache_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = None
+
+    def cached() -> list[Release] | None:
+        if (isinstance(cache, dict) and isinstance(cache.get("repos"), dict)
+                and repo in cache["repos"]):
+            items = cache["repos"][repo]
+            return [Release(**item) for item in items]
+        return None
+
+    fresh = (isinstance(cache, dict)
+             and time.time() - (cache.get("ts") or 0) < RELEASES_TTL)
+    if not offline and fresh:
+        got = cached()
+        # ловушка «свежий кэш, но записи нет»: без проверки на None
+        # повторный запрос другого репо возвращал пустой список вместо API
+        if got is not None:
+            return got
+
+    if offline:
+        got = cached()
+        return got if got is not None else []
+
+    payload = _api_get(f"https://api.github.com/repos/{repo}/releases"
+                       f"?per_page=30")
+    entries = _release_entries(payload, repo)
+    repos = dict(cache.get("repos") or {}) if isinstance(cache, dict) else {}
+    repos[repo] = [entry.__dict__ for entry in entries]
+    try:
+        _cache_path().parent.mkdir(parents=True, exist_ok=True)
+        _cache_path().write_text(
+            json.dumps({"ts": int(time.time()), "repos": repos},
+                       ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass  # кэш - оптимизация, его отсутствие не критично
+    return entries
+
+
+def latest_release(repo: str = REPO_FLOWSEAL) -> Release:
+    """Последняя версия репозитория (для «скачай последний релиз»)."""
+    entries = releases(repo)
+    if not entries:
+        raise ReleaseError(f"в {repo} нет версий")
+    return entries[0]
+
+
+def release_by_tag(repo: str, tag: str) -> Release | None:
+    """Найти версию в уже загруженном списке (без сети, если кэш свеж)."""
+    for entry in releases(repo):
+        if entry.tag == tag:
+            return entry
+    return None
 
 
 def download(release: Release, progress=None) -> Path:
     """Скачать zip в кэш Diaspas; progress(байт, всего|None) - по ходу.
 
-    Оборванное соединение не должно выглядеть как успех: полученные байты
-    сверяются с Content-Length, а битый кэш с предыдущей попытки
-    перекачивается заново, а не переиспользуется.
+    Каждая версия живёт в кэше отдельно: переключение между версиями не
+    перекачивает их заново. Повторное скачивание той же версии возвращает
+    кэш, но только если он валиден (zip).
     """
     paths.cache_dir().mkdir(parents=True, exist_ok=True)
-    target = paths.cache_dir() / f"zapret-{release.tag}.zip"
+    target = paths.cache_dir() / (
+        f"zapret-{release.short_repo}-{release.tag}.zip")
     if target.is_file() and target.stat().st_size > 0:
         if zipfile.is_zipfile(target):
             if progress:
@@ -129,7 +237,7 @@ def download(release: Release, progress=None) -> Path:
             return target
     except HTTPError as exc:
         _cleanup(tmp)
-        raise ReleaseError(f"не удалось скачать релиз: HTTP {exc.code}") from exc
+        raise ReleaseError(f"не удалось скачать: HTTP {exc.code}") from exc
     except URLError as exc:
         _cleanup(tmp)
         raise ReleaseError(f"обрыв скачивания: {exc.reason}") from exc
@@ -151,16 +259,44 @@ def _cleanup(part: Path) -> None:
         pass
 
 
-def install(zip_path: Path, dest: Path, progress=None) -> Path:
+def _locate_root(staging: Path) -> Path | None:
+    """Найти папку установки вглубь (до 3 уровней).
+
+    zipball ветки (win-bundle) кладёт всё в <repo>-<sha>/zapret-winws/ -
+    одноразовый поиск в корне распаковки его не находит. Критерий -
+    service.bat, general*.bat или preset*.cmd (то, по чему install
+   判定 установку валидной).
+    """
+    frontier = [staging]
+    for _ in range(3):
+        nxt: list[Path] = []
+        for d in frontier:
+            if ((d / "service.bat").is_file()
+                    or list(d.glob("general*.bat"))
+                    or list(d.glob("preset*.cmd"))):
+                return d
+            try:
+                nxt.extend(p for p in d.iterdir() if p.is_dir())
+            except OSError:
+                continue
+        if not nxt:
+            break
+        frontier = nxt
+    return None
+
+
+def install(zip_path: Path, dest: Path, repo: str = REPO_FLOWSEAL,
+            progress=None, name: str = "") -> Path:
     """Распаковать релиз в dest (с заменой СВОЕЙ версии), вернуть папку.
 
-    Соседние версии не трогаются: рядом могут жить 1.9.x и 1.10.x -
-    хранение нескольких версий для переключения и отката. Распаковка
-    идёт во временную staging-папку; в dest переезжает только готовый
-    результат, а старая копия ТОЖ ЭТОЙ версии удаляется первой.
+    Соседние версии не трогаются: рядом могут жить 1.9.x, 1.10.x и
+    win-bundle - хранение нескольких версий для переключения и отката.
+    Распаковка идёт во временную staging-папку; в dest переезжает только
+    готовый результат, а старая копия ТОЖ ЭТОЙ версии удаляется первой.
 
-    Каждый шаг обёрнут в ReleaseError с указанием, где встало: пустая папка
-    после сбоя - ровно та проблема, что ловили на живой системе.
+    name - имя папки установки; пусто - взять из архива. Для zipball
+    ветки имя архива содержит хэш коммита (bol-van-...-6eb463a), который
+    меняется от сборки к сборке - вызывающий передаёт стабильное имя.
     """
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
@@ -194,19 +330,17 @@ def install(zip_path: Path, dest: Path, progress=None) -> Path:
             "распаковка не удалась (антивирус может блокировать запись "
             f"WinDivert): {exc}") from exc
 
-    # Найти распакованную папку: если zip содержал единственный каталог - он и есть.
-    entries = [p for p in staging.iterdir() if p.is_dir()]
-    root = entries[0] if len(entries) == 1 and not any(
-        staging.glob("*.bat")) else staging
-
-    if not (root / "service.bat").is_file():
+    # Найти папку установки: у zipball она вглубь (zapret-winws/)
+    root = _locate_root(staging)
+    if root is None:
         shutil.rmtree(staging, ignore_errors=True)
-        raise ReleaseError("в распакованном релизе нет service.bat")
-    _ensure_license(root)
+        raise ReleaseError(
+            "в распакованном релизе нет ни service.bat, ни preset*.cmd")
+    _ensure_license(root, repo)
 
     # готово: переезд в dest/<имя версии>; старая копия этой же версии
     # удаляется, чужие версии не трогаются
-    final = dest / root.name
+    final = dest / (name or root.name)
     if root.resolve() == final.resolve():
         # flat-архив (без верхней папки): распакованное уже на месте
         return final
@@ -229,42 +363,35 @@ def install(zip_path: Path, dest: Path, progress=None) -> Path:
     return final
 
 
-def _ensure_license(root: Path) -> None:
+def _ensure_license(root: Path, repo: str = REPO_FLOWSEAL) -> None:
     """LICENSE.txt в папке установки - обязательство MIT.
 
-    В релизах Flowseal файла нет (проверено на 1.10.3: в архиве только
-    .bat), поэтому тянем оригинал с GitHub raw; если и там не вышло -
-    оставляем указатель на первоисточник. Ссылка без текста - минимум,
-    а не норма.
+    У win-bundle LICENSE нет (проверено на master) - берём MIT оригинала
+    bol-van: он автор и winws, и win-bundle. Если и сеть недоступна -
+    оставляем указатель на первоисточник: ссылка без текста - минимум.
     """
     target = root / "LICENSE.txt"
     if target.is_file() and target.stat().st_size > 200:
         return
 
-    url = (f"https://raw.githubusercontent.com/{paths.ZAPRET_OWNER}/"
-           f"{paths.ZAPRET_REPO}/main/LICENSE.txt")
-    try:
-        request = Request(url, headers={"User-Agent": _USER_AGENT})
-        with urlopen(request, timeout=_TIMEOUT) as response:
-            text = response.read().decode("utf-8", "replace")
-        if "MIT License" in text:
-            target.write_text(text, encoding="utf-8", newline="\n")
-            return
-    except (HTTPError, URLError, OSError, ValueError):
-        pass  # ниже - запасной указатель
+    url = _LICENSE_URLS.get(repo)
+    if url:
+        try:
+            request = Request(url, headers={"User-Agent": _USER_AGENT})
+            with urlopen(request, timeout=_TIMEOUT) as response:
+                text = response.read().decode("utf-8", "replace")
+            if "License" in text or "MIT" in text:
+                target.write_text(text, encoding="utf-8", newline="\n")
+                return
+        except (HTTPError, URLError, OSError, ValueError):
+            pass  # ниже - запасной указатель
 
     try:
         target.write_text(
             "LICENSE.txt отсутствовал в релизе, а загрузить с GitHub не "
             "удалось. Оригинал:\n"
-            f"{url}\n\n"
-            f"Источник: https://github.com/{paths.ZAPRET_OWNER}/"
-            f"{paths.ZAPRET_REPO}\n",
+            f"{url or repo}\n\n"
+            f"Источник: https://github.com/{repo}\n",
             encoding="utf-8", newline="\n")
     except OSError:
         pass
-
-
-def update_installed(dest: Path, progress=None) -> Path:
-    """Скачать последний релиз и распаковать в dest одной операцией."""
-    return install(download(latest_release(), progress), dest, progress)

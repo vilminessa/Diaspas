@@ -21,6 +21,10 @@ from core import log as dlog
 from core import paths
 from i18n import tr
 
+# Период фонового опроса службы (сек): замечает смену стратегии вне Diaspas
+# и автозапуск после перезагрузки без ручной проверки
+_STATE_POLL_SECONDS = 5.0
+
 
 class App(tk.Tk):
     def __init__(self) -> None:
@@ -37,9 +41,31 @@ class App(tk.Tk):
         self._last_select: dict | None = None
         self._last_probe_report: dict | None = None
 
+        # фоновое обновление состояния: замечает изменения, сделанные вне
+        # Diaspas (service.bat, автозапуск после перезагрузки ПК)
+        self._running = True
+        self._warned_drift = False
+
         self._build()
         self.after(120, self._pump)
         self.after(200, self._initial_state)
+        self._start_state_polling()
+
+    # -- background обновление состояния -------------------------------
+
+    def _start_state_polling(self) -> None:
+        """Периодически перечитывать состояние службы.
+
+        Планировщик Tk (``after``) - в главном потоке: воркер ``check_state``
+        уходит в фон и кладёт результат в очередь, которую разбирает ``_pump``.
+        """
+        def tick() -> None:
+            if not self._running:
+                return
+            self.check_state()
+            self.after(int(_STATE_POLL_SECONDS * 1000), tick)
+
+        self.after(int(_STATE_POLL_SECONDS * 1000), tick)
 
     # -- сборка -----------------------------------------------------------
 
@@ -69,7 +95,7 @@ class App(tk.Tk):
         # 2. пресеты
         pf = ttk.LabelFrame(root, text=tr("presets.title"), padding=8)
         pf.pack(fill="x", **pad)
-        self._preset_list = presets_mod.load_presets()
+        self._preset_list = presets_mod.load_presets(self._zapret_root)
         self._preset_buttons: dict[str, ttk.Button] = {}
         grid = ttk.Frame(pf)
         grid.pack(fill="x")
@@ -84,6 +110,21 @@ class App(tk.Tk):
         ttk.Label(pf, textvariable=self._preset_hint,
                   foreground="#555", wraplength=820,
                   justify="left").pack(fill="x", pady=(6, 0))
+
+        # смена стратегии: в Tk-резерве её тоже нужно переключать, иначе
+        # при отсутствии webview ALT11 оставалась бы неизменяемой
+        strat_row = ttk.Frame(pf)
+        strat_row.pack(fill="x", pady=(6, 0))
+        ttk.Label(strat_row, text="Стратегия:").pack(side="left")
+        self._strategy_combo = ttk.Combobox(strat_row, values=[], width=26,
+                                            state="readonly")
+        self._strategy_combo.pack(side="left", padx=(6, 0))
+        self._strategy_btn = ttk.Button(strat_row, text="Применить стратегию",
+                                        command=self.apply_strategy)
+        self._strategy_btn.pack(side="left", padx=(6, 0))
+        self._strategy_var = tk.StringVar(value="")
+        ttk.Label(strat_row, textvariable=self._strategy_var,
+                  foreground="#555").pack(side="left", padx=(10, 0))
 
         # 3. пробы + A/B
         pf2 = ttk.LabelFrame(root, text=tr("probe.title"), padding=8)
@@ -193,8 +234,10 @@ class App(tk.Tk):
         state = "disabled" if busy else "normal"
         for btn in self._preset_buttons.values():
             btn.configure(state=state)
-        for btn in (self._probe_btn, self._ab_btn, self._select_btn):
+        for btn in (self._probe_btn, self._ab_btn, self._select_btn,
+                    self._strategy_btn):
             btn.configure(state=state)
+        self._strategy_combo.configure(state="disabled" if busy else "readonly")
         self._cancel_btn.configure(state="normal" if busy else "disabled")
 
     def _bg(self, fn, *args, **kwargs) -> None:
@@ -227,8 +270,31 @@ class App(tk.Tk):
                     root, state, active_key=presets_mod.active_preset_key())
             except Exception:  # noqa: BLE001 - распознавание не должно валить статус
                 current = None
+        self._notice_drift(state, current)
         self._q.put(("state", {"state": state, "root": root,
                                "preset": current}))
+
+    def _notice_drift(self, state: service.ServiceState,
+                      current: presets_mod.Preset | None) -> None:
+        """Один раз за сессию отметить расхождение маркера и факта.
+
+        Маркер ``active_preset`` есть, служба стоит, но состояние ему не
+        отвечает - значит, правили вне Diaspas (service.bat) или служба
+        поднялась автозапуском после перезагрузки ПК.
+        """
+        if self._warned_drift or not state.installed:
+            return
+        active_key = presets_mod.active_preset_key()
+        if not active_key or active_key == "off" or current is not None:
+            return
+        settings = paths.read_settings()
+        settings["last_known_preset"] = active_key
+        paths.write_settings(settings)
+        self._warned_drift = True
+        self.log("warning",
+                 f"дрейф пресета «{active_key}»: состояние не отвечает "
+                 f"маркеру - правки вне Diaspas (service.bat) или "
+                 f"автозапуск после перезагрузки")
 
     def _render_state(self, data: dict) -> None:
         state: service.ServiceState = data["state"]
@@ -252,6 +318,90 @@ class App(tk.Tk):
         for key, btn in self._preset_buttons.items():
             btn.configure(text=self._preset_title(key)
                           + (" ●" if key == active else ""))
+        self._refresh_strategy_list(state, root)
+
+    def _refresh_strategy_list(self, state: service.ServiceState,
+                               root: Path | None) -> None:
+        """Список стратегий активной установки + фактическая стратегия.
+
+        Подсвечивается то, что реально стоит в службе, а не то, что
+        Diaspas когда-то хотел поставить: иначе «Применить стратегию»
+        висит на уже выбранном пункте.
+        """
+        if root is None:
+            self._strategy_combo.configure(values=[])
+            self._strategy_combo.set("")
+            self._strategy_var.set(tr("status.no_dir"))
+            return
+        try:
+            names = presets_mod.available_strategies(root)
+            current = presets_mod.current_strategy_file(root, state)
+        except Exception:  # noqa: BLE001 - список не должен ронять карточку
+            names, current = [], ""
+        self._strategy_combo.configure(values=names)
+        chosen = current or (names[0] if names else "")
+        self._strategy_combo.set(chosen)
+        self._strategy_var.set(
+            f"сейчас: {paths.strategy_label(current)}" if current
+            else "стратегий в установке нет")
+
+    def _target_preset(self):
+        """Пресет, к которому привязывается выбор стратегии.
+
+        Маркер -> первый рабочий пресет: без маркера (служба поставлена
+        service.bat) переключение раньше было невозможно вовсе.
+        """
+        presets = presets_mod.load_presets(self._zapret_root)
+        key = presets_mod.active_preset_key()
+        preset = next((p for p in presets if p.key == key and not p.off), None)
+        if preset is None:
+            preset = next((p for p in presets if not p.off), None)
+        return preset
+
+    def apply_strategy(self) -> None:
+        """Сменить стратегию пресета и пересоздать службу."""
+        if self._busy:
+            return
+        if self._zapret_root is None:
+            messagebox.showwarning("Diaspas", tr("err.no_dir"), parent=self)
+            return
+        strategy = self._strategy_combo.get()
+        if not strategy:
+            messagebox.showinfo("Diaspas", "В установке нет стратегий",
+                                parent=self)
+            return
+        preset = self._target_preset()
+        if preset is None:
+            messagebox.showinfo("Diaspas", "Нет рабочего пресета для смены "
+                                           "стратегии", parent=self)
+            return
+        if messagebox.askyesno(
+                "Diaspas",
+                f"Применить стратегию {paths.strategy_label(strategy)} "
+                f"к пресету «{preset.title}»? Служба будет пересоздана.\n\n"
+                f"Выбор запомнится для этой установки.",
+                parent=self) is not True:
+            return
+        self._preset_hint.set(f"стратегия {paths.strategy_label(strategy)} "
+                              f"для «{preset.title}»")
+        self._bg(self._apply_strategy_worker, preset, strategy)
+
+    def _apply_strategy_worker(self, preset, strategy: str) -> None:
+        """Записать выбор по установке и применить пресет с новой стратегией."""
+        self._q.put(("busy", True))
+        try:
+            presets_mod.set_strategy(preset.key, strategy, self._zapret_root)
+            fresh = next((p for p in presets_mod.load_presets(self._zapret_root)
+                          if p.key == preset.key), None)
+            if fresh is None:
+                self._q.put(("error", f"пресет {preset.key!r} не найден"))
+                return
+            res = presets_mod.apply(fresh, self._zapret_root, log=self.log)
+            if not res.get("ok"):
+                self._q.put(("error", str(res.get("error"))))
+            self._state_worker()
+        finally:
+            self._q.put(("busy", False))
 
     def _preset_title(self, key: str) -> str:
         for preset in self._preset_list:
@@ -527,5 +677,11 @@ class App(tk.Tk):
 
 def main() -> int:
     app = App()
+
+    def on_closing() -> None:
+        app._running = False
+        app.destroy()
+
+    app.protocol("WM_DELETE_WINDOW", on_closing)
     app.mainloop()
     return 0

@@ -32,6 +32,9 @@ const S = {
   presets: [],
   probes: null,      // последний отчёт пробы
   versions: null,    // реестр установленных версий zapret
+  strategies: null,  // стратегии активной установки
+  releaseRepos: null, // доступные версии обоих источников
+  lastSelectBest: null, // лучшая стратегия последнего перебора
   busy: false,
   logs: [],          // строки журнала (объекты {ts, level, text})
   logFilter: "all",
@@ -115,7 +118,7 @@ function renderState(st) {
 
   $("#v-service").textContent = st.installed
     ? (run ? "работает" : "остановлена") : "не установлена";
-  $("#v-strategy").textContent = st.strategy || "—";
+  $("#v-strategy").textContent = st.strategy_label || st.strategy || "—";
   $("#v-preset").textContent = st.preset_title || "не распознан";
   $("#v-pid").textContent = st.pid ? String(st.pid) : "—";
   $("#zapret-path").textContent = st.zapret_dir || "папка не найдена";
@@ -130,6 +133,17 @@ function renderState(st) {
     $("#btn-create-service").textContent = name
       ? `Создать службу — пресет «${name}»` : "Создать службу (выберите пресет)";
     $("#btn-create-service").onclick = () => createService(key);
+  }
+
+  // кнопка «Восстановить после перезапуска»: служба запущена, но пресет
+  // не распознан - правки вне Diaspas (service.bat) или автозапуск
+  const needRestore = st.needs_restore;
+  if (needRestore) {
+    $("#btn-restore-after-restart").classList.remove("hidden");
+    $("#btn-restore-after-restart").textContent = "Восстановить после перезапуска";
+    $("#btn-restore-after-restart").onclick = () => restoreAfterRestart(st.suggested_preset);
+  } else {
+    $("#btn-restore-after-restart").classList.add("hidden");
   }
 
   // подсветка активного пресета
@@ -148,11 +162,27 @@ async function createService(key) {
     toast("Выберите пресет в разделе «Пресеты»", "");
     return;
   }
+  const strat = p.strategy_label || labelOf(p.strategy);
   const okBox = await confirmBox("Создать службу",
     `Папка релиза на месте, но служба zapret не установлена.\n\n` +
-    `Применить пресет «${p.title}»? Он создаст службу и включит обход.`);
+    `Применить пресет «${p.title}» со стратегией ${strat}? ` +
+    `Он создаст службу и включит обход.`);
   if (!okBox) return;
   // confirmed=true: вопрос уже задан - applyPreset не должен спрашивать снова
+  await applyPreset(p, true);
+}
+
+async function restoreAfterRestart(key) {
+  const p = S.presets.find((x) => x.key === key);
+  if (!p || p.off || !key) {
+    toast("Выберите пресет в разделе «Пресеты»", "");
+    return;
+  }
+  const okBox = await confirmBox("Восстановить после перезапуска",
+    `Служба запущена, но Diaspas не распознал текущий пресет\n` +
+    `(правки через service.bat или автозапуск после перезагрузки).\n\n` +
+    `Применить пресет «${p.title}» для синхронизации состояния?`);
+  if (!okBox) return;
   await applyPreset(p, true);
 }
 
@@ -166,6 +196,268 @@ async function refreshVersions() {
   } catch (e) {
     toast("Ошибка: " + e, "err");
     return null;
+  }
+}
+
+/* ── стратегии активной установки: выбор и применение ─────────────── */
+
+async function refreshStrategies() {
+  try {
+    const st = await api().strategies();
+    S.strategies = st;
+    renderStrategies(st);
+    return st;
+  } catch (e) {
+    toast("Ошибка: " + e, "err");
+    return null;
+  }
+}
+
+function renderStrategies(st) {
+  const sel = $("#strategy-select");
+  renderPresetSelect($("#strategy-preset"), st && st.target_preset);
+  sel.innerHTML = "";
+  if (!st || !st.ok || !st.items || !st.items.length) {
+    const opt = document.createElement("option");
+    opt.textContent = st && st.ok ? "нет стратегий" : "папка zapret не найдена";
+    opt.value = "";
+    sel.appendChild(opt);
+    $("#btn-apply-strategy").classList.add("hidden");
+    $("#btn-save-strategy").classList.add("hidden");
+    $("#strategy-layout").textContent = "";
+    $("#strategy-current").textContent = "";
+    return;
+  }
+  st.items.forEach((name) => {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = labelOf(name);
+    sel.appendChild(opt);
+  });
+  // подсвечиваем ФАКТИЧЕСКУЮ стратегию службы, а не обещание пресета:
+  // иначе кнопка «Применить» висит на пункте, который уже стоит, и
+  // «текущая стратегия» выглядит врём
+  sel.value = st.current_strategy || st.preset_strategy || st.items[0];
+  const layout = st.layout === "winws"
+    ? "win-bundle (preset*.cmd)" : "Flowseal (general*.bat)";
+  $("#strategy-layout").textContent = layout;
+  $("#strategy-current").textContent = st.current_strategy
+    ? `сейчас: ${labelOf(st.current_strategy)}` : "";
+  updateStrategyButtons();
+}
+
+/* Целевой пресет выбирается явно: без этого стратегия привязывалась
+   только к маркеру active_preset, и служба, поставленная service.bat,
+   переключаться не давала вовсе. «Выкл» не принимает стратегию. */
+function renderPresetSelect(sel, target) {
+  sel.innerHTML = "";
+  const list = S.presets.filter((p) => !p.off);
+  list.forEach((p) => {
+    const opt = document.createElement("option");
+    opt.value = p.key;
+    opt.textContent = p.title;
+    sel.appendChild(opt);
+  });
+  if (!list.length) return;
+  sel.value = list.some((p) => p.key === target) ? target : list[0].key;
+}
+
+function strategyTargetKey() {
+  const sel = $("#strategy-preset");
+  return sel.value || (S.strategies && S.strategies.target_preset) || null;
+}
+
+function updateStrategyButtons() {
+  const chosen = $("#strategy-select").value;
+  const running = S.strategies && S.strategies.current_strategy;
+  const stored = S.strategies && S.strategies.preset_strategy;
+  // «Применить» - только когда есть что менять по факту службы
+  $("#btn-apply-strategy").classList.toggle(
+    "hidden", !chosen || chosen === running);
+  // «Запомнить» - выбор без перезапуска службы, если он отличается от
+  // записанного для пресета (следующее применение пресета его использует)
+  $("#btn-save-strategy").classList.toggle(
+    "hidden", !chosen || chosen === stored);
+}
+
+async function applyChosenStrategy() {
+  const chosen = $("#strategy-select").value;
+  if (!chosen) return;
+  const key = strategyTargetKey();
+  if (!key || key === "off") {
+    toast("Выберите пресет — стратегия привязывается к нему", "");
+    return;
+  }
+  const p = S.presets.find((x) => x.key === key);
+  const title = p ? p.title : key;
+  const okBox = await confirmBox("Применение стратегии",
+    `Пресет «${title}» будет применён со стратегией «${labelOf(chosen)}».\n` +
+    `Стратегия запомнится для этого пресета в этой установке.\n\nПродолжить?`);
+  if (!okBox) return;
+  setBusy(true, `применяю ${labelOf(chosen)}…`);
+  try {
+    const res = await api().apply_preset(key, chosen);
+    if (res && res.ok) {
+      toast(`Пресет «${title}» со стратегией ${labelOf(chosen)} применён`, "ok");
+    } else {
+      toast("Ошибка: " + ((res && res.error) || "неизвестно"), "err");
+    }
+  } catch (e) {
+    toast("Ошибка: " + e, "err");
+  } finally {
+    setBusy(false, "готов");
+    await refreshState();
+    await refreshStrategies();
+    await refreshVersions();
+    await refreshPresets();
+  }
+}
+
+async function saveChosenStrategy() {
+  // выбор без перезапуска службы: применится при следующем действии
+  const chosen = $("#strategy-select").value;
+  const key = strategyTargetKey();
+  if (!chosen || !key || key === "off") return;
+  setBusy(true, "запоминаю стратегию…");
+  try {
+    const res = await api().set_preset_strategy(key, chosen);
+    if (res && res.ok) {
+      toast(`Для пресета запомнена стратегия ${labelOf(chosen)} — ` +
+            `применится при следующем применении пресета`, "ok");
+    } else {
+      toast("Ошибка: " + ((res && res.error) || "неизвестно"), "err");
+    }
+  } catch (e) {
+    toast("Ошибка: " + e, "err");
+  } finally {
+    setBusy(false, "готов");
+    await refreshPresets();
+    await refreshStrategies();
+  }
+}
+
+async function takeBestStrategy() {
+  // «взять лучшую» = применить целевой пресет с рекомендованной стратегией
+  const best = S.lastSelectBest;
+  const key = strategyTargetKey();
+  if (!best) return;
+  if (!key || key === "off") {
+    toast("Выберите пресет — стратегия привязывается к нему", "");
+    return;
+  }
+  const p = S.presets.find((x) => x.key === key);
+  const okBox = await confirmBox("Применение рекомендации",
+    `Применить к пресету «${p ? p.title : key}» стратегию ` +
+    `«${labelOf(best)}» из перебора?`);
+  if (!okBox) return;
+  setBusy(true, `применяю ${labelOf(best)}…`);
+  try {
+    const res = await api().apply_preset(key, best);
+    if (res && res.ok) {
+      toast(`Стратегия ${labelOf(best)} применена`, "ok");
+      $("#btn-take-best").classList.add("hidden");
+    } else {
+      toast("Ошибка: " + ((res && res.error) || "неизвестно"), "err");
+    }
+  } catch (e) {
+    toast("Ошибка: " + e, "err");
+  } finally {
+    setBusy(false, "готов");
+    await refreshState();
+    await refreshStrategies();
+    await refreshPresets();
+  }
+}
+
+/* ── скачивание любой доступной версии ────────────────────────────── */
+
+async function listReleases() {
+  setBusy(true, "запрашиваю список версий у GitHub…");
+  let res;
+  try {
+    res = await api().available_releases();
+  } finally {
+    setBusy(false, "готов");
+  }
+  if (!res || !res.ok) {
+    toast("Ошибка: " + ((res && res.error) || "нет связи с GitHub"), "err");
+    return;
+  }
+  S.releaseRepos = res.repos;
+  renderRepoSelect(res.repos);
+  renderReleaseTable(currentRepo());
+}
+
+function currentRepo() {
+  if (!S.releaseRepos || !S.releaseRepos.length) return null;
+  const name = $("#release-repo").value;
+  return S.releaseRepos.find((r) => r.repo === name) || S.releaseRepos[0];
+}
+
+function renderRepoSelect(repos) {
+  const sel = $("#release-repo");
+  sel.innerHTML = "";
+  repos.forEach((r) => {
+    const opt = document.createElement("option");
+    opt.value = r.repo;
+    const short = r.repo.split("/").pop();
+    opt.textContent = `${short} (${r.entries.length})` +
+      (r.stale ? " — офлайн-кэш" : "");
+    sel.appendChild(opt);
+  });
+}
+
+function renderReleaseTable(repoData) {
+  const tbody = $("#release-table tbody");
+  if (!repoData || !repoData.entries || !repoData.entries.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="muted">нет версий</td></tr>';
+    return;
+  }
+  tbody.innerHTML = "";
+  repoData.entries.forEach((e) => {
+    const tr = document.createElement("tr");
+    const size = e.branch ? "ветка"
+      : (e.size ? `${(e.size / 1048576).toFixed(1)} МБ` : "—");
+    const date = e.published ? e.published.slice(0, 10) : "—";
+    tr.innerHTML =
+      `<td class="mono">${escapeHtml(e.tag)}</td>` +
+      `<td class="mono">${escapeHtml(date)}</td>` +
+      `<td class="mono">${escapeHtml(size)}</td>` +
+      `<td><button class="btn" data-repo="${escapeHtml(e.repo)}" ` +
+      `data-tag="${escapeHtml(e.tag)}">Скачать</button></td>`;
+    tr.querySelector("button").onclick = () =>
+      downloadChosen(e.repo, e.tag);
+    tbody.appendChild(tr);
+  });
+}
+
+async function downloadChosen(repo, tag) {
+  const short = repo.split("/").pop();
+  const okBox = await confirmBox("Скачивание версии",
+    `Скачать ${short} ${tag}?\n\nВерсия установится РЯДОМ с текущими, ` +
+    `затем её можно сделать активной. Пресет будет применён к ней, ` +
+    `а после проверки обхода можно переключиться обратно.`);
+  if (!okBox) return;
+  setBusy(true, `скачиваю ${short} ${tag}…`);
+  try {
+    const res = await api().download_release(repo, tag);
+    if (res && res.ok) {
+      toast(`Установлена версия ${tag}`, "ok");
+      if (res.needs_preset && res.active_preset) {
+        await createService(res.active_preset);
+      }
+      await offerStale(res.stale);
+    } else {
+      toast("Ошибка: " + ((res && res.error) || "неизвестно"), "err");
+    }
+  } catch (e) {
+    toast("Ошибка: " + e, "err");
+  } finally {
+    setBusy(false, "готов");
+    await refreshState();
+    await refreshVersions();
+    await refreshStrategies();
+    await refreshPresets();
   }
 }
 
@@ -184,7 +476,10 @@ function renderVersions(v) {
       opt.value = it.path;
       const mark = it.path === v.active ? "● активная" : "";
       const broken = it.valid ? "" : " (повреждена)";
-      opt.textContent = `${it.version}${mark ? " — " + mark : ""}${broken}`;
+      const layout = it.layout === "winws" ? "win-bundle" :
+        (it.layout === "flowseal" ? "flowseal" : "");
+      opt.textContent = `${it.version}${mark ? " — " + mark : ""}` +
+        `${layout ? " [" + layout + "]" : ""}${broken}`;
       opt.disabled = !it.valid;
       sel.appendChild(opt);
     });
@@ -229,6 +524,10 @@ async function switchVersion() {
     setBusy(false, "готов");
     await refreshState();
     await refreshVersions();
+    // активная установка сменилась - список стратегий и дефолты пресетов
+    // другие (переопределения хранятся по установке)
+    await refreshStrategies();
+    await refreshPresets();
   }
 }
 
@@ -249,6 +548,8 @@ async function rollbackVersion() {
     setBusy(false, "готов");
     await refreshState();
     await refreshVersions();
+    await refreshStrategies();
+    await refreshPresets();
   }
 }
 
@@ -335,6 +636,8 @@ async function updateLatest(tag) {
     setBusy(false, "готов");
     await refreshState();
     await refreshVersions();
+    await refreshStrategies();
+    await refreshPresets();
   }
 }
 
@@ -389,12 +692,29 @@ function renderPresets(presets) {
     const b = document.createElement("button");
     b.className = "preset-card";
     b.dataset.key = p.key;
+    // стратегия видна на карточке: без неё «везде ALT11» читалось как
+    // неизменяемое, хотя переопределение существовало в настройках
+    const strat = p.off ? "" :
+      `<span class="strat${p.overridden ? " custom" : ""}">` +
+      `${escapeHtml(p.strategy_label || labelOf(p.strategy))}` +
+      `${p.overridden ? " · изменена" : ""}</span>`;
     b.innerHTML = `<span class="name">${escapeHtml(p.title)}<span class="mark"></span></span>
+                   ${strat}
                    <span class="desc">${escapeHtml(p.description || "")}</span>`;
     b.onmouseenter = () => { $("#preset-hint").textContent = p.description || ""; };
     b.onclick = () => applyPreset(p);
     grid.appendChild(b);
   });
+  // сетка пересобрана - подсветку активного пресета надо вернуть
+  if (S.state) renderState(S.state);
+}
+
+async function refreshPresets() {
+  try {
+    renderPresets(await api().presets());
+  } catch (e) {
+    toast("Не удалось обновить пресеты: " + e, "err");
+  }
 }
 
 async function applyPreset(p, confirmed = false) {
@@ -403,7 +723,8 @@ async function applyPreset(p, confirmed = false) {
   if (!confirmed) {
     const what = p.off
       ? "Служба zapret будет удалена, winws остановлен."
-      : `Стратегия: ${p.strategy}${p.game_filter ? `, Game Filter: ${p.game_filter}` : ""}` +
+      : `Стратегия: ${p.strategy_label || p.strategy}` +
+        `${p.game_filter ? `, Game Filter: ${p.game_filter}` : ""}` +
         `${p.ipset ? `, IPSet: ${p.ipset}` : ""}` +
         `${p.exclude_domains && p.exclude_domains.length ? ", исключения: " + p.exclude_domains.join(", ") : ""}`;
     const ok = await confirmBox(`Пресет «${p.title}»`, what + "\n\nПродолжить?");
@@ -423,6 +744,8 @@ async function applyPreset(p, confirmed = false) {
   } finally {
     setBusy(false, "готов");
     await refreshState();
+    await refreshStrategies();
+    await refreshPresets();
   }
 }
 
@@ -544,7 +867,7 @@ function rowHtml(r) {
   });
   const stateCls = r.state === "full" ? "ok" : (r.state === "partial" ? "warn" : "err");
   return `<tr>
-    <td class="mono">${escapeHtml((r.name || "").replace(/^general ?\(?|\)?\.bat$/g, ""))}</td>
+    <td class="mono">${escapeHtml(labelOf(r.name))}</td>
     <td class="${stateCls}">${escapeHtml(r.state || "")}</td>
     <td class="mono">${r.count}/${r.total}</td>
     <td>${cell(targets.discord)}</td><td>${cell(targets.youtube)}</td>
@@ -572,6 +895,12 @@ async function runSelect() {
       const best = res.best ? labelOf(res.best) : "не подобрана";
       $("#select-best").classList.remove("hidden");
       $("#select-best").textContent = `★ Рекомендуемая стратегия: ${best}`;
+      // рекомендация должна применяться, а не только отображаться
+      S.lastSelectBest = res.best || null;
+      if (res.best) {
+        $("#btn-take-best").classList.remove("hidden");
+        $("#btn-take-best").textContent = `★ Взять ${best}`;
+      }
       toast(`Лучшая стратегия: ${best}`, "ok");
     }
   } catch (e) {
@@ -584,7 +913,13 @@ async function runSelect() {
 }
 
 function labelOf(file) {
-  return (file || "").replace(/^general ?\(?|\)?\.bat$/g, "") || "general";
+  // general (ALT11).bat / general (ALT11) -> ALT11; general.bat -> general;
+  // preset1_example.cmd -> preset1_example (win-bundle)
+  const name = String(file || "");
+  if (!name) return "";
+  const m = name.match(/^general\s*\(([^)]+)\)/i);
+  if (m) return m[1];
+  return name.replace(/\.(bat|cmd)$/i, "") || "general";
 }
 
 /* ── журнал ──────────────────────────────────────────────────── */
@@ -626,7 +961,11 @@ async function installRelease() {
     const res = await api().install_release();
     if (res && res.ok) {
       toast("Релиз установлен: " + (res.tag || ""), "ok");
-      // замыкаем цикл: релиз даёт только папку, службу создаёт пресет
+      // замыкаем цикл: релиз даёт только папку, службу создаёт пресет.
+      // Пресеты и стратегии перечитываются под НОВУЮ папку - у неё может
+      // быть другой layout, и стратегия дефолта тоже другая
+      await refreshPresets();
+      await refreshStrategies();
       if (res.needs_preset) {
         if (res.active_preset) {
           await createService(res.active_preset);
@@ -644,6 +983,8 @@ async function installRelease() {
     setBusy(false, "готов");
     await refreshState();
     await refreshVersions();
+    await refreshStrategies();
+    await refreshPresets();
   }
 }
 
@@ -655,7 +996,10 @@ async function pickDir() {
   } catch (e) {
     toast("Ошибка: " + e, "err");
   }
+  // папка сменилась - список стратегий и дефолты пресетов берутся из неё
   await refreshState();
+  await refreshStrategies();
+  await refreshPresets();
 }
 
 /* ── helpers ─────────────────────────────────────────────────── */
@@ -681,6 +1025,17 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#btn-ab").onclick = runAb;
   $("#btn-select").onclick = runSelect;
   $("#btn-select-cancel").onclick = () => api().select_cancel();
+  $("#btn-take-best").onclick = takeBestStrategy;
+  // стратегии: выбор, применение и запоминание без перезапуска службы
+  $("#btn-apply-strategy").onclick = applyChosenStrategy;
+  $("#btn-save-strategy").onclick = saveChosenStrategy;
+  $("#strategy-select").onchange = updateStrategyButtons;
+  $("#strategy-preset").onchange = updateStrategyButtons;
+  // восстановление после перезапуска
+  $("#btn-restore-after-restart").onclick = () => restoreAfterRestart();
+  // скачивание версий
+  $("#btn-list-releases").onclick = listReleases;
+  $("#release-repo").onchange = () => renderReleaseTable(currentRepo());
   // версии zapret
   $("#btn-switch-version").onclick = switchVersion;
   $("#btn-rollback").onclick = rollbackVersion;
@@ -696,6 +1051,8 @@ document.addEventListener("DOMContentLoaded", () => {
       "hidden", !chosen || chosen === act);
     $("#btn-remove-version").classList.toggle(
       "hidden", !chosen || chosen === act);
+    // список стратегий зависит от установки: у другой версии - свои
+    refreshStrategies();
   };
   $("#log-filter").onchange = (e) => { S.logFilter = e.target.value; renderLog(); };
   $("#btn-log-copy").onclick = async () => {
@@ -732,6 +1089,7 @@ async function init() {
     renderPresets(await api().presets());
     await refreshState();
     await refreshVersions();
+    await refreshStrategies();
     $("#statusbar-text").textContent = "готов";
     await warmupPrivileges();
   } catch (e) {

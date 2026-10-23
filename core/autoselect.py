@@ -1,4 +1,8 @@
-"""Автоподбор рабочей стратегии: перебор general*.bat одной повышенной сессией.
+"""Автоподбор рабочей стратегии: перебор стратегий одной повышенной сессией.
+
+Стратегии берутся из установки как есть: ``general*.bat`` во Flowseal и
+``preset*.cmd`` в win-bundle (см. presets.available_strategies) - перебор
+для winws-layout иначе вообще не запускался.
 
 Идея из service.bat (12. Run Tests) и Synfronia: каждая стратегия
 запускается, прогоняется по целям, результат пишется по ходу - карточка
@@ -279,12 +283,20 @@ def run(root, strategies: list[str] | None = None, log=None,
     import os
     import subprocess
 
-    from .paths import strategy_files as _files
-
     root = Path(root)
-    names = strategies if strategies is not None else _files(root)
+    from . import installs
+    from . import presets as presets_mod
+
+    info = installs.detect_layout(root)
+    # стратегии win-bundle лежат рядом с winws.exe, а не в корне релиза:
+    # помощник обязан запускать их из той папки, где они нашлись
+    exec_root = (info["winws_dir"] or root
+                 if info["layout"] == installs.LAYOUT_WINWS else root)
+    names = (strategies if strategies is not None
+             else presets_mod.available_strategies(root))
     if not names:
-        return {"ok": False, "error": "в папке нет general*.bat"}
+        return {"ok": False, "error": "в папке нет стратегий "
+                                      "(general*.bat или preset*.cmd)"}
 
     work = _work_dir()
     runner = _write_selector()
@@ -297,7 +309,7 @@ def run(root, strategies: list[str] | None = None, log=None,
             pass
 
     token = str(int(time.time() * 1000))
-    req = {"action": "select", "token": token, "root": str(root),
+    req = {"action": "select", "token": token, "root": str(exec_root),
            "configs": names}
     try:
         (work / "request.json").write_text(
