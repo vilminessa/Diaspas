@@ -114,6 +114,23 @@ def test_ab_group_argument(monkeypatch, quiet):
     assert quiet == [[dc.PY, "tests/run_ab.py", "ea"]]
 
 
+def test_tray_launch_starts_hidden(quiet):
+    """Пункт трея запускает GUI скрытым (--min), окно - из иконки."""
+    assert dc.main(["T"]) == 0
+    assert quiet[-1] == [dc.PY, "main.py", "--min"]
+
+
+def test_tray_launch_can_target_tk(quiet):
+    assert dc.main(["T", "--tk"]) == 0
+    assert quiet[-1] == [dc.PY, "main.py", "--min", "--tk"]
+
+
+def test_tray_launch_refused_in_scripted_mode(quiet):
+    """Быстрый режим не запускает GUI: он блокирует консоль до выхода из трея."""
+    assert dc.main(["T", "--scripted"]) == 2
+    assert quiet == []
+
+
 def test_ab_declined_at_the_prompt(monkeypatch, quiet):
     monkeypatch.setattr(dc, "_ask", lambda text: "n")
     assert dc.main(["F", "ea"]) == 1

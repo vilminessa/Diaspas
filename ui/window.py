@@ -19,7 +19,7 @@ from tkinter import filedialog, messagebox, ttk
 import version
 from core import abtest, autoselect, autoswitch, presets as presets_mod, probes, release, service
 from core import log as dlog
-from core import paths, strategies as strategies_mod
+from core import paths, strategies as strategies_mod, tray
 from i18n import tr
 
 
@@ -41,9 +41,15 @@ class App(tk.Tk):
         self._strategy_infos: list[strategies_mod.StrategyInfo] = []
         self._auto_checked = False      # авто при старте - один раз на сессию
         self._auto_running = False
+        # трей: иконка после успешной регистрации, скрыто ли окно, идущие
+        # операции трея (повторный клик той же операции отказывается)
+        self._tray: tray.Tray | None = None
+        self._tray_busy: set[str] = set()
+        self._hidden = False
 
         self._build()
         self.log("info", f"запуск интерфейса (Tkinter) - сборка {version.label()}")
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(120, self._pump)
         self.after(200, self._initial_state)
 
@@ -89,6 +95,22 @@ class App(tk.Tk):
         self._strategy_note = tk.StringVar(value="")
         ttk.Label(srow, textvariable=self._strategy_note, foreground="#666",
                   wraplength=420, justify="left").pack(side="left",
+                                                       padx=(10, 0))
+
+        # трей: иконка + скрытие окна (обход при этом не выключается)
+        trow = ttk.Frame(card)
+        trow.pack(fill="x", pady=(6, 0))
+        self._tray_var = tk.BooleanVar(value=tray.enabled())
+        self._tray_check = ttk.Checkbutton(
+            trow, text=tr("tray.enabled"), variable=self._tray_var,
+            command=self.toggle_tray)
+        self._tray_check.pack(side="left")
+        self._tray_hide_btn = ttk.Button(trow, text=tr("tray.hide"),
+                                         command=self.hide_window)
+        self._tray_hide_btn.pack(side="left", padx=(6, 0))
+        self._tray_note = tk.StringVar(value=tr("tray.note"))
+        ttk.Label(trow, textvariable=self._tray_note, foreground="#666",
+                  wraplength=360, justify="left").pack(side="left",
                                                        padx=(10, 0))
 
         # 2. пресеты
@@ -213,6 +235,16 @@ class App(tk.Tk):
                     self._set_busy(payload[0])
                 elif kind == "release":
                     self._release_var.set(payload[0])
+                elif kind == "tray_show":
+                    self._show_window()
+                elif kind == "tray_hide":
+                    self._hide_window()
+                elif kind == "tray_exit":
+                    self._stop_tray()
+                    self.destroy()
+                elif kind == "tray_mode":
+                    self._auto_var.set(payload[0] == strategies_mod.AUTO)
+                    self._sync_strategy_controls()
                 elif kind == "error":
                     messagebox.showerror("Diaspas", payload[0], parent=self)
         except queue.Empty:
@@ -511,6 +543,13 @@ class App(tk.Tk):
             self._q.put(("auto_done", res))
             if res.get("probes"):
                 self._q.put(("probes", res["probes"]))
+            # уведомление трея: результат виден, даже когда окно скрыто
+            if res.get("applied"):
+                self._tray_notify("Diaspas",
+                                  f"авто: применена {res.get('label') or ''}")
+            elif not res.get("ok"):
+                self._tray_notify("Diaspas",
+                                  f"автоподбор: {res.get('error') or 'не удалось'}")
             self._state_worker()
         finally:
             self._auto_running = False
@@ -553,6 +592,12 @@ class App(tk.Tk):
             self._probe_var.set(tr("probe.running"))
             report = probes.probe_all(timeout=6.0)
             self._q.put(("probes", report))
+            failed = probes.failed_targets(report)
+            if failed and strategies_mod.mode() != strategies_mod.AUTO:
+                # в ручном режиме никто не подбирает - уведомление говорит,
+                # что сбой есть и требует решения
+                self._tray_notify("Diaspas",
+                                  f"цели не отвечают: {', '.join(failed)[:60]}")
             # В авто-режиме сбой проб - триггер: подбор и применение
             # лучшей стратегии прямо в этом же фоновом потоке.
             if (strategies_mod.mode() == strategies_mod.AUTO
@@ -721,8 +766,247 @@ class App(tk.Tk):
                                parent=self) is True:
             self._bg(self._strategy_worker, strategy_file)
 
+    # -- трей -------------------------------------------------------------
 
-def main() -> int:
+    def _tray_state(self) -> dict:
+        """Словарь для модели меню - те же ключи, что у ``App.state`` webview."""
+        st = service.state()
+        current = None
+        if self._zapret_root is not None:
+            try:
+                current = presets_mod.current_preset(
+                    self._zapret_root, st,
+                    active_key=presets_mod.active_preset_key())
+            except Exception:  # noqa: BLE001 - распознавание не валит меню
+                current = None
+        strategy_file = strategies_mod.current_file(self._zapret_root, st)
+        return {
+            "dir_ok": self._zapret_root is not None,
+            "installed": st.installed,
+            "running": st.running,
+            "strategy": st.strategy,
+            "strategy_label": (paths.strategy_label(strategy_file)
+                               if strategy_file else (st.strategy or "")),
+            "strategy_mode": strategies_mod.mode(),
+            "preset_key": current.key if current else None,
+            "preset_title": current.title if current else None,
+            "auto_cooldown_left": autoswitch.cooldown_left(),
+            "auto_last_strategy": autoswitch.last_strategy(),
+            "strategies": [{"file": info.file, "label": info.label,
+                            "active": info.active}
+                           for info in self._strategy_infos],
+        }
+
+    def _tray_spec(self) -> tray.TraySpec:
+        presets = [{"key": p.key, "title": p.title, "off": p.off}
+                   for p in presets_mod.load_presets()]
+        return tray.tray_model(self._tray_state(), presets,
+                               busy={"auto": self._auto_running,
+                                     "select": bool(self._busy)},
+                               last_probes=self._last_probe_report)
+
+    def tray_action(self, action: str) -> dict:
+        """Пункт меню трея -> операция. Долгие уходят в фон: цикл трея не может
+        ждать минуты, а виджет обновится через очередь."""
+        ops = _TrayOps(self)
+        if tray.is_heavy(action):
+            if action in self._tray_busy or (action == tray.AUTO_RUN
+                                             and self._auto_running):
+                return {"ok": False, "error": "операция уже выполняется"}
+            self._tray_busy.add(action)
+
+            def worker() -> None:
+                try:
+                    self.log("info", f"трей: {action}")
+                    res = tray.handle(action, ops)
+                    if not res.get("ok"):
+                        self.log("error", f"трей {action}: {res.get('error')}")
+                except Exception:  # noqa: BLE001
+                    self.log("exception", f"трей {action}")
+                finally:
+                    self._tray_busy.discard(action)
+                    self._tray_update()
+
+            threading.Thread(target=worker, daemon=True).start()
+            return {"ok": True, "started": action}
+
+        res = tray.handle(action, ops)
+        self._tray_update()
+        return res
+
+    def _tray_update(self) -> None:
+        if self._tray:
+            try:
+                self._tray.update()
+            except Exception:  # noqa: BLE001
+                dlog.exception("обновление трея")
+
+    def _tray_notify(self, title: str, text: str) -> None:
+        """Уведомление трея + запись в журнал (журнал - источник правды)."""
+        self.log("info", f"уведомление: {title} · {text}")
+        if self._tray:
+            try:
+                self._tray.notify(title, text)
+            except Exception:  # noqa: BLE001
+                dlog.exception("уведомление трея")
+
+    def start_tray(self) -> dict:
+        """Поднять иконку; мягкий отказ - GUI работает как без трея."""
+        if self._tray:
+            return {"ok": True, "hwnd": self._tray.hwnd}
+        holder = tray.Tray(self._tray_spec, self.tray_action)
+        res = holder.start()
+        if res.get("ok"):
+            self._tray = holder
+            self.log("info",
+                     f"трей: иконка зарегистрирована (hwnd={res.get('hwnd')})")
+            self._tray_note.set(tr("tray.note"))
+            self._tray_hide_btn.configure(state="normal")
+        else:
+            reason = res.get("error") or "неизвестно"
+            self.log("warning", tr("tray.unavailable", reason=reason))
+            self._tray_note.set(tr("tray.unavailable", reason=reason))
+            self._tray_hide_btn.configure(state="disabled")
+        return res
+
+    def _stop_tray(self) -> None:
+        if self._tray:
+            self._tray.quit()
+            self._tray.join(2.0)
+            self._tray = None
+
+    def toggle_tray(self) -> None:
+        """Чекбокс «Скрывать в трей»."""
+        flag = tray.set_enabled(bool(self._tray_var.get()))
+        if flag:
+            res = self.start_tray()
+            self.log("info", tr("tray.on"))
+            if not res.get("ok"):
+                self._tray_var.set(False)      # отказ - чекбокс не врёт
+        else:
+            self._stop_tray()
+            self._tray_hide_btn.configure(state="disabled")
+            self.log("info", tr("tray.off"))
+        self._tray_update()
+
+    def hide_window(self) -> None:
+        """Кнопка «Скрыть окно»: обход и автоциклы продолжают работать."""
+        if not tray.enabled() or not self._tray:
+            messagebox.showwarning("Diaspas", tr("tray.off"), parent=self)
+            return
+        self._q.put(("tray_hide",))
+
+    def _hide_window(self) -> None:
+        self.withdraw()
+        self._hidden = True
+        self.log("info", tr("tray.hidden"))
+        self._tray_update()
+
+    def _show_window(self) -> None:
+        self.deiconify()
+        self.lift()
+        self._hidden = False
+        self.log("info", tr("tray.shown"))
+        self._tray_update()
+
+    def _on_close(self) -> None:
+        """Крестик = выход: иконку убираем, службу zapret не трогаем."""
+        self._stop_tray()
+        self.destroy()
+
+
+class _TrayOps:
+    """Адаптер трея к Tk: тот же набор операций, что у webview-App.
+
+    Подтверждений нет - пункт меню выбран осознанно; исключение только
+    «Выход» при работающем обходе. Долгие операции уходят в ``_bg`` и
+    возвращаются в UI через очередь.
+    """
+
+    def __init__(self, app: "App") -> None:
+        self._app = app
+
+    def apply_preset(self, key: str) -> dict:
+        preset = next((p for p in presets_mod.load_presets()
+                       if p.key == key), None)
+        if preset is None:
+            return {"ok": False, "error": f"пресет {key!r} не найден"}
+        if self._app._zapret_root is None:
+            return {"ok": False, "error": tr("err.no_dir")}
+        self._app._bg(self._app._apply_worker, preset)
+        return {"ok": True, "started": key}
+
+    def apply_strategy(self, file: str) -> dict:
+        if self._app._zapret_root is None:
+            return {"ok": False, "error": tr("err.no_dir")}
+        self._app._bg(self._app._strategy_worker, str(file))
+        return {"ok": True, "started": str(file)}
+
+    def mode(self) -> str:
+        return strategies_mod.mode()
+
+    def set_mode(self, mode: str) -> dict:
+        value = str(mode or "").strip().lower()
+        if value not in (strategies_mod.MANUAL, strategies_mod.AUTO):
+            return {"ok": False, "error": f"неизвестный режим {value!r}"}
+        if not strategies_mod.set_mode(value):
+            return {"ok": False, "error": "режим не сохранён"}
+        self._app.log("info", tr("strategies.mode_set",
+                                 mode="авто" if value == strategies_mod.AUTO
+                                 else "ручной"))
+        self._app._q.put(("tray_mode", value))
+        return {"ok": True, "mode": value}
+
+    def auto_run(self, force: bool = False) -> dict:
+        if self._app._zapret_root is None:
+            return {"ok": False, "error": tr("err.no_dir")}
+        self._app._bg(self._app._auto_worker, None, force)
+        return {"ok": True, "started": "auto"}
+
+    def check_and_autofix(self) -> dict:
+        """Пробы; сбой в режиме «авто» сам запускает подбор (_probes_worker)."""
+        if self._app._zapret_root is None:
+            return {"ok": False, "error": tr("err.no_dir")}
+        self._app._bg(self._app._probes_worker)
+        return {"ok": True, "started": "probes"}
+
+    def show_window(self, tab: str | None = None) -> dict:
+        self._app._q.put(("tray_show", tab))
+        return {"ok": True}
+
+    def hide_window(self) -> dict:
+        self._app._q.put(("tray_hide",))
+        return {"ok": True}
+
+    def exit_app(self) -> dict:
+        if service.state().running and not tray.confirm(
+                "Выход", tr("tray.exit_confirm")):
+            self._app.log("info", "выход из трея отменён")
+            return {"ok": True, "cancelled": True}
+        self._app.log("info", "выход из трея: закрытие приложения")
+        self._app._q.put(("tray_exit",))
+        return {"ok": True}
+
+
+def main(hidden: bool = False) -> int:
+    """Tk-резерв: тот же трей, что в webview, и тот же одиночный экземпляр.
+
+    Проверка экземпляра - до создания окна: второй запуск не должен показывать
+    своё окно и запускать второй автоцикл.
+    """
     app = App()
+    if tray.enabled():
+        claim = tray.Tray(app._tray_spec, app.tray_action).claim_singleton()
+        if claim.get("ok") and not claim.get("owner"):
+            app.log("info", tr("tray.second_instance"))
+            app.destroy()
+            return 0
+        if claim.get("ok"):
+            app.start_tray()
+        else:
+            app.log("warning", f"трей: {claim.get('error')}")
+    if hidden:
+        app.after(150, app.hide_window)
     app.mainloop()
+    app._stop_tray()
     return 0

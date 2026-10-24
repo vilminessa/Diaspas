@@ -126,6 +126,7 @@ function renderState(st) {
   $("#zapret-path").title = st.zapret_dir || "";
 
   renderStrategy(st);
+  renderTray(st);
 
   // кнопка «Создать службу»: папка есть, а службы нет
   const need = st.dir_ok && !st.installed;
@@ -212,6 +213,63 @@ function syncStrategyControls() {
   btn.disabled = busy || auto || noDir;
   box.disabled = busy || noDir;
   box.closest(".check").classList.toggle("off", box.disabled);
+}
+
+/* ── трей ─────────────────────────────────────────────────────── */
+/** Трей: чекбокс показывает включённость, кнопка — скрытие окна.
+    «Иконка не поднялась» отличается от «трей выключен»: мягкий отказ
+    (нет интерактивного десктопа) должен быть виден, а не молчать. */
+function renderTray(st) {
+  const box = $("#tray-enabled");
+  box.checked = !!st.tray;
+  box.disabled = S.busy;
+  box.closest(".check").classList.toggle("off", box.disabled);
+
+  const hidden = !!st.window_hidden;
+  const btn = $("#btn-hide-window");
+  btn.disabled = !st.tray_running || hidden || S.busy;
+  btn.textContent = hidden ? "Окно скрыто" : "Скрыть окно";
+
+  $("#tray-note").textContent = st.tray
+    ? (st.tray_running
+        ? "иконка в трее: меню меняет пресет и стратегию, обход не выключается"
+        : "трей включён, но иконка не поднялась (нет интерактивного десктопа)")
+    : "трей выключен: закрытие окна выходит из приложения";
+}
+
+async function setTray(on) {
+  if (S.busy) return;
+  setBusy(true, on ? "включаю трей…" : "выключаю трей…");
+  try {
+    const res = await api().set_tray(!!on);
+    if (res && res.ok) {
+      toast(on ? "Трей включён" : "Трей выключен", "ok");
+    } else {
+      toast("Трей: " + ((res && res.error) || "не удалось"), "err");
+      $("#tray-enabled").checked = false;   // отказ - чекбокс не врёт
+    }
+  } catch (e) {
+    toast("Ошибка: " + e, "err");
+    $("#tray-enabled").checked = false;
+  } finally {
+    setBusy(false, "готов");
+    await refreshState();
+  }
+}
+
+async function hideWindow() {
+  if (S.busy) return;
+  try {
+    const res = await api().hide_window();
+    if (res && res.ok) {
+      toast("Окно скрыто — открывай двойным кликом по иконке трея", "ok");
+    } else {
+      toast("Скрыть не удалось: " + ((res && res.error) || "нет трея"), "err");
+    }
+    await refreshState();
+  } catch (e) {
+    toast("Ошибка: " + e, "err");
+  }
 }
 
 async function applyStrategy(file) {
@@ -650,6 +708,8 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#btn-select-apply").onclick = () => applyStrategy($("#btn-select-apply").dataset.file);
   $("#btn-apply-strategy").onclick = () => applyStrategy();
   $("#auto-strategy").onchange = toggleAutoMode;
+  $("#tray-enabled").onchange = (e) => setTray(e.target.checked);
+  $("#btn-hide-window").onclick = hideWindow;
   $("#log-filter").onchange = (e) => { S.logFilter = e.target.value; renderLog(); };
   $("#btn-log-copy").onclick = async () => {
     const text = S.logs.map((l) => l.raw || l.text).join("\n");
@@ -665,6 +725,8 @@ document.addEventListener("DOMContentLoaded", () => {
   window.diaspas.on("select_progress", (p) => renderSelectProgress(p));
   window.diaspas.on("busy", (b) => setBusy(!!b.busy, b.label));
   window.diaspas.on("toast", (t) => toast(t.text, t.kind));
+  // трей просит конкретную вкладку («Журнал») - окно может быть скрыто
+  window.diaspas.on("tab", (t) => { if (t && t.tab) switchTab(t.tab); });
 
   // pywebview сообщает о готовности
   window.addEventListener("pywebviewready", init, { once: true });

@@ -9,6 +9,7 @@ WebView2, нет pywebview), откатываемся на Tkinter-окно ui/w
 
     python main.py           # webview
     python main.py --debug   # webview с DevTools (консоль JS)
+    python main.py --min     # старт скрытым: окно открывается из трея
     python main.py --tk      # Tkinter-резерв, без попытки webview
 
 Сборка: ``pyinstaller diaspas.spec``. Ручные прогоны - debug.bat.
@@ -39,11 +40,9 @@ def main() -> int:
             traceback.print_exc()
             sys.stderr.write("webview не запустился - Tkinter-резерв\n")
 
-    # 2. Tkinter - резервное окно (тот же core)
-    from ui.window import App
-    app = App()
-    app.mainloop()
-    return 0
+    # 2. Tkinter - резервное окно (тот же core, тот же трей)
+    from ui.window import main as tk_main
+    return tk_main(hidden="--min" in argv)
 
 
 if __name__ == "__main__":

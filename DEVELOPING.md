@@ -75,6 +75,77 @@ CI не гоняются — они живые (`tests/run_*`, `tests/integratio
 в быстром режиме требуют `--yes`. `winws.exe` консолью не трогается: это
 процесс обхода, а не проекта.
 
+## Трей: модель, клей и потоки
+
+`core/tray.py` — два слоя в одном файле. Модель (`tray_model`, `tooltip`,
+`icon_state`, `Item`/`Submenu`/`Separator`, разбор id, `is_heavy`, `handle`)
+не знает Win32 и проверяется офлайн; клей (`Tray`, `confirm`,
+`claim_singleton`) — только тонкая обёртка над сообщениями.
+
+**Свой NotifyIcon на ctypes, не pystray.** pystray тянет Pillow (+6–10 МБ в
+onefile-бандл и dependency в requirements), а рантайм проекта — только
+stdlib. Клей специально сделан мягким: в Session 0 и в CI нет
+интерактивного десктопа, `Shell_NotifyIconW(NIM_ADD)` там отказывает, и
+`Tray.start` возвращает `{ok: False, error}` с warning в журнале — GUI
+ведёт себя ровно как без трея.
+
+**Что CI проверяет, а что нет.** Офлайн: модель меню, диспетчер `handle`,
+настройки трея, отказ регистрации и таймаут `start`, одиночный экземпляр и
+`_forget_target` (все с подменёнными `tray.user32`/`tray.shell32`/
+`tray.kernel32`), `LoadIconW` — он десктопа не требует. Не проверяется в CI:
+реальная иконка на экране, popup-меню, balloon, пробуждение чужого окна —
+это живые прогоны (`debug.bat T`, `python main.py --min`, второй запуск).
+
+**Потоки.** Нить трея владеет NotifyIcon: `update`/`notify`/`show_request`
+из других нитей только слают сообщения (`PostMessageW`,
+зарегистрированные `DiaspasTray`/`DiaspasTrayUpdate`/`DiaspasTrayShow`/
+`DiaspasTrayQuit`), а `Shell_NotifyIconW` вызываются из этой нити. Меню
+строится заново на каждый правый клик (`TrackPopupMenuEx` с
+`TPM_RETURNCMD`), поэтому состояние всегда актуально без обновления меню;
+без `SetForegroundWindow` перед треком меню не закрывается кликом вне его,
+без `PostMessage(WM_NULL)` после — Windows считает меню активным и следующий
+правый клик игнорирует.
+
+Долгие пункты (`preset:`, `strategy:`, `auto.run`, `probes.run`) уходят в
+worker-нить: цикл трея не может ждать минуты. Повторный клик той же операции
+отказывается (`_tray_busy`), а не поднимает вторую. Общий протокол операций —
+`tray.Ops`: webview-`App` реализует его напрямую, Tk — адаптер `_TrayOps`
+над `_bg` и kinds очереди `tray_show`/`tray_hide`/`tray_exit`/`tray_mode`.
+Триггер «пробы с сбоями → автоцикл» перенесён в Python
+(`App.check_and_autofix`): со скрытым окном JS ничего не опрашивает.
+
+**Ограничения pywebview.** `webview.start` обязан быть на главном потоке и
+не перезапускается после `Application.Exit` — поэтому окно создаётся
+видимым и скрывается внутри `bootstrap` (`hidden=True` на создании не
+используется), а «Открыть окно» возвращает то же окно. `hide`/`show`/`destroy`
+ждут `events.shown` (до 20 с) и маршаллись через `Invoke`, так что вызов из
+нити трея безопасен. Крестик не перехватывается: закрытие окна = выход
+процесса, трей при съезде убирается (`app.stop_tray` после `webview.start`).
+Память при скрытии не освобождается — форма WinForms и процесс WebView2
+живут, это documented limitation в docstring `core/tray.py`.
+
+**Клей Win32: что сработало и где падает.** Указатели и `LRESULT` нужно
+restype'ить (`VP = c_void_p`, `LRESULT = c_ssize_t`), иначе ctypes вернёт
+`int` и hwnd/hIcon теряются на x64. `Shell_NotifyIconW` — в `shell32`, не в
+`user32`. `WNDCLASSEXW`: `hClassMenu` идёт **после** `lpszClassName`, с
+«красивым» порядком `RegisterClassExW` отказывает с `ERROR_INVALID_PARAMETER`
+(87). Строки в структуре — `ctypes.c_wchar * N` (`create_unicode_buffer` в
+`_fields_` не принимает тип), `szTip` вмещает 63 символа. Иконка —
+системные значки `LoadIconW(None, IDI_*)`: свои пиксели здесь не выходят
+(`CreateIcon` с 32-битными битами рисует чёрное, `CreateIconIndirect` с
+1-битной DIB-маской — NULL без кода ошибки, `LoadImageW` по ICO — access
+violation), а handle системный, поэтому `DestroyIcon` к нему применять
+нельзя.
+
+**Одиночный экземпляр.** Признак живости — сам именованный mutex
+`DiaspasGui`: kernel закрывает handle при выходе процесса, поэтому
+`ERROR_ALREADY_EXISTS` означает «есть живой владелец». Записанные
+`tray_pid`/`tray_hwnd` — только адрес для `PostMessageW`: pid мог быть
+переиспользован чужим процессом, поэтому цель проверяется `IsWindow` и
+результатом отправки. Если слать нечем (запись от мёртвого окна), экземпляр
+не «показывает чужое», а takeover'ит трей сам — скрытый живой GUI, который
+нельзя разбудить, хуже второй иконки.
+
 ## Живые прогоны
 
 - `tests/run_probes.py`, `tests/run_ab.py <группа>` — сеть;

@@ -119,6 +119,22 @@ def op_tk(args: list[str]) -> int:
     return _run([PY, "main.py", "--tk"], args)
 
 
+def op_tray(args: list[str]) -> int:
+    """Запуск GUI скрытым (--min): окно открывается двойным кликом по иконке.
+
+    В быстром режиме не выполняется: GUI блокирует консоль до выхода из трея,
+    а --scripted наследуется дочерним процессом и менял бы его поведение.
+    """
+    if scripted():
+        print("в быстром режиме запуск GUI не выполняется - он ждёт выхода из трея")
+        return 2
+    cmd = [PY, "main.py", "--min"]
+    if "--tk" in args:
+        cmd.append("--tk")
+    print("окно скрыто: открыть - двойной клик по иконке, выход - из меню трея")
+    return _run(cmd, [])
+
+
 def op_smoke_gui(args: list[str]) -> int:
     return _run([PY, "tests/smoke_webview.py"], args)
 
@@ -431,6 +447,8 @@ OPS: list[dict] = [
      "fn": op_debug},
     {"keys": ["3", "tk"], "title": "Запустить Tkinter-резерв (--tk)",
      "fn": op_tk},
+    {"keys": ["T", "tray"], "title": "Запуск GUI скрытым (--min, иконка в трее)",
+     "fn": op_tray},
     {"keys": ["4", "smoke"], "title": "Smoke GUI: окно, мост JS<->Python, журнал",
      "fn": op_smoke_gui},
     {"keys": ["5", "tests"], "title": "Тесты офлайн (pytest)",

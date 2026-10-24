@@ -27,7 +27,7 @@ import webview
 
 import version
 from core import abtest, autoselect, autoswitch, log as dlog, paths, presets as presets_mod
-from core import probes, release, service, strategies as strategies_mod
+from core import probes, release, service, strategies as strategies_mod, tray
 from i18n import tr
 from ui.bundle import INDEX_HTML
 
@@ -81,6 +81,13 @@ class App:
         self._auto_running = False
         # один warning о пропавшей службе на сессию - без спама в журнал
         self._warned_missing_service = False
+        # окно и трей: window - pywebview Window, tray - core.tray.Tray после
+        # успешной регистрации; window_hidden - свой флаг, у pywebview нет
+        # свойства visible у скрытого окна
+        self.window = None
+        self.tray: tray.Tray | None = None
+        self.window_hidden = False
+        self._tray_busy: set[str] = set()
 
     # -- журнал --------------------------------------------------------
 
@@ -175,6 +182,11 @@ class App:
                                  or "discord_youtube"),
             "zapret_dir": str(self.zapret_root) if self.zapret_root else None,
             "release_note": settings.get("zapret_release") or "",
+            # трей: включён ли, поднят ли, скрыто ли окно - UI показывает
+            # чекбокс и кнопку «Скрыть» по этим значениям, а не по догадке
+            "tray": tray.enabled(),
+            "tray_running": bool(self.tray and self.tray.hwnd),
+            "window_hidden": self.window_hidden,
         }
 
     def presets(self) -> list[dict]:
@@ -408,11 +420,203 @@ class App:
             self.log("error", f"открыть журнал: {exc}")
             return {"ok": False, "error": str(exc)}
 
+    # -- трей ------------------------------------------------------------
+
+    def mode(self) -> str:
+        """Текущий режим смены стратегий (для переключателя в меню трея)."""
+        return strategies_mod.mode()
+
+    def set_mode(self, mode: str) -> dict:
+        return self.set_strategy_mode(mode)
+
+    def notify(self, title: str, text: str) -> None:
+        """Уведомление трея и запись в журнал: журнал остаётся правдой."""
+        self.log("info", f"уведомление: {title} · {text}")
+        if self.tray:
+            try:
+                self.tray.notify(title, text)
+            except Exception:  # noqa: BLE001 - уведомление не валит операцию
+                self.log("exception", "уведомление трея")
+
+    def check_and_autofix(self) -> dict:
+        """Пробы, и если режим «авто» и есть сбой - подбор и применение.
+
+        Тот же триггер, что во фронтенде после проб. В Python он нужен для
+        трея: со скрытым окном JS ничего не опрашивает, и автопереключение
+        наступало бы только при открытом окне.
+        """
+        report = self.probes_run()
+        failed = probes.failed_targets(report)
+        if not failed:
+            return {"ok": True, "probes": report}
+        if strategies_mod.mode() != strategies_mod.AUTO:
+            self.notify("Diaspas", f"цели не отвечают: {', '.join(failed)[:60]}")
+            return {"ok": True, "probes": report, "failed": failed}
+        res = self.auto_run()
+        if res.get("ok"):
+            label = (res.get("label")
+                     or paths.strategy_label(res.get("strategy") or ""))
+            if label:
+                self.notify("Diaspas", f"авто: применена {label}")
+        else:
+            self.notify("Diaspas",
+                        f"автоподбор: {res.get('error') or 'не удалось'}")
+        return {"ok": True, "probes": report, "auto": res, "failed": failed}
+
+    def show_window(self, tab: str | None = None) -> dict:
+        """Показать окно (пункт трея «Открыть окно», «Журнал» - с вкладкой)."""
+        if self.window is None:
+            return {"ok": False, "error": "окно не создано"}
+        try:
+            self.window.show()
+        except Exception:  # noqa: BLE001
+            self.log("exception", "show_window")
+            return {"ok": False, "error": traceback.format_exc(limit=3)}
+        self.window_hidden = False
+        self.log("info", tr("tray.shown"))
+        if tab:
+            self.emitter.emit("tab", {"tab": str(tab)})
+        self.emitter.emit("state", self.state())
+        return {"ok": True}
+
+    def hide_window(self) -> dict:
+        """Скрыть окно: обход и автоциклы продолжают работать."""
+        if self.window is None:
+            return {"ok": False, "error": "окно не создано"}
+        try:
+            self.window.hide()
+        except Exception:  # noqa: BLE001
+            self.log("exception", "hide_window")
+            return {"ok": False, "error": traceback.format_exc(limit=3)}
+        self.window_hidden = True
+        self.log("info", tr("tray.hidden"))
+        self.tray_update()
+        return {"ok": True}
+
+    def exit_app(self) -> dict:
+        """Выход из трея. Спрашиваем только когда обход работает: служба
+        zapret живёт отдельно, и закрытие GUI её не выключает."""
+        if service.state().running and not tray.confirm(
+                "Выход", tr("tray.exit_confirm")):
+            self.log("info", "выход из трея отменён")
+            return {"ok": True, "cancelled": True}
+        self.log("info", "выход из трея: закрытие приложения")
+        if self.tray:
+            self.tray.quit()
+        if self.window is not None:
+            try:
+                self.window.destroy()   # пустой список окон -> Application.Exit
+            except Exception:  # noqa: BLE001
+                self.log("exception", "destroy окна")
+        return {"ok": True}
+
+    def tray_update(self) -> None:
+        if self.tray:
+            try:
+                self.tray.update()
+            except Exception:  # noqa: BLE001
+                self.log("exception", "обновление трея")
+
+    def tray_spec(self) -> tray.TraySpec:
+        """Меню трея по текущему состоянию: строится на каждый правый клик."""
+        return tray.tray_model(self.state(), self.presets(),
+                               busy={"auto": self._auto_running,
+                                     "select": self._select_running},
+                               last_probes=self.last_probes)
+
+    def tray_action(self, action: str) -> dict:
+        """Пункт меню трея -> операция.
+
+        Долгие операции (пресет, стратегия, подбор, пробы) уходят в нить:
+        цикл трея не может ждать минуты, а состояние в меню уже показано.
+        Повторный клик той же операции отказывается, а не запускает вторую.
+        """
+        if tray.is_heavy(action):
+            if action in self._tray_busy or (action == tray.AUTO_RUN
+                                             and self._auto_running):
+                return {"ok": False, "error": "операция уже выполняется"}
+            self._tray_busy.add(action)
+
+            def worker() -> None:
+                try:
+                    self.log("info", f"трей: {action}")
+                    res = tray.handle(action, self)
+                    if not res.get("ok"):
+                        self.log("error", f"трей {action}: {res.get('error')}")
+                except Exception:  # noqa: BLE001
+                    self.log("exception", f"трей {action}")
+                finally:
+                    self._tray_busy.discard(action)
+                    self.tray_update()
+
+            threading.Thread(target=worker, daemon=True).start()
+            return {"ok": True, "started": action}
+
+        res = tray.handle(action, self)
+        if not res.get("ok"):
+            self.log("error", f"трей {action}: {res.get('error')}")
+        self.tray_update()
+        return res
+
+    def start_tray(self) -> dict:
+        """Поднять иконку. Мягкий отказ: GUI ведёт себя как без трея."""
+        if self.tray:
+            return {"ok": True, "hwnd": self.tray.hwnd}
+        holder = tray.Tray(self.tray_spec, self.tray_action)
+        res = holder.start()
+        if res.get("ok"):
+            self.tray = holder
+            self.log("info",
+                     f"трей: иконка зарегистрирована (hwnd={res.get('hwnd')})")
+        else:
+            self.log("warning", tr("tray.unavailable",
+                                   reason=res.get("error") or "неизвестно"))
+        return res
+
+    def stop_tray(self) -> None:
+        if self.tray:
+            self.tray.quit()
+            self.tray.join(2.0)
+            self.tray = None
+
+    def set_tray(self, value: bool) -> dict:
+        """Включить/выключить трей; при выключении иконка снимается."""
+        flag = tray.set_enabled(bool(value))
+        if flag:
+            res = self.start_tray()
+            if not res.get("ok"):
+                return {"ok": False, "tray": False,
+                        "error": res.get("error") or "трей не поднялся"}
+            self.log("info", tr("tray.on"))
+        else:
+            self.stop_tray()
+            self.log("info", tr("tray.off"))
+        self.emitter.emit("state", self.state())
+        return {"ok": True, "tray": flag}
+
 
 def run() -> int:
-    """Создать окно и отдать управление pywebview."""
+    """Создать окно и отдать управление pywebview.
+
+    Трей поднимается в ``func`` после старта GUI: до ``events.shown``
+    ``hide``/``destroy`` не работают (pywebview ждёт это событие), и второй
+    экземпляр проверяется до создания окна - иначе он плодил бы иконку и
+    второй автоцикл.
+    """
     app = App()
+    hidden_start = "--min" in sys.argv
     app.log("info", f"запуск интерфейса (webview) - сборка {version.label()}")
+
+    holder: tray.Tray | None = None
+    if tray.enabled():
+        holder = tray.Tray(app.tray_spec, app.tray_action)
+        claim = holder.claim_singleton()
+        if not claim.get("ok"):
+            app.log("warning", f"трей: {claim.get('error')}")
+            holder = None
+        elif not claim.get("owner"):
+            app.log("info", tr("tray.second_instance"))
+            return 0
 
     def guard(fn):
         """Обёртка api-метода: каждая ошибка становится журналом (с
@@ -449,6 +653,8 @@ def run() -> int:
     api.pick_dir = guard(app.pick_dir)
     api.log_tail = guard(app.log_tail)
     api.open_log = guard(app.open_log)
+    api.set_tray = guard(app.set_tray)
+    api.hide_window = guard(app.hide_window)
 
     win = webview.create_window(
         title="Diaspas (διάσπασις)",
@@ -460,13 +666,31 @@ def run() -> int:
         background_color="#12161c",
         text_select=True,
     )
+    app.window = win
     app.emitter.bind(win)
     # хвост журнала прошлого запуска - сразу в окно, до первого вызова JS
     for line in dlog.tail(60):
         app.emitter.emit("log", line)
 
+    def bootstrap() -> None:
+        """После старта GUI: иконка трея и старт скрытым по флагу --min."""
+        if holder:
+            res = holder.start()
+            if res.get("ok"):
+                app.tray = holder
+                app.log("info",
+                        f"трей: иконка зарегистрирована (hwnd={res.get('hwnd')})")
+                app.tray_update()
+            else:
+                app.log("warning", tr("tray.unavailable",
+                                     reason=res.get("error") or "неизвестно"))
+        if hidden_start:
+            app.hide_window()
+
     # --debug: DevTools WebView2 - консоль JS видна, пока правим фронтенд
     # (в собранном exe флага нет, debug остаётся False)
-    webview.start(debug="--debug" in sys.argv)
+    webview.start(bootstrap, debug="--debug" in sys.argv)
+    app.stop_tray()      # окно закрыли (крестик = выход) - иконку убираем
+    app.window = None
     app.log("info", "интерфейс закрыт")
     return 0
