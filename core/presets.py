@@ -86,22 +86,6 @@ DEFAULT_PRESETS: tuple[Preset, ...] = (
                     "закрыты на уровне сети - обход их не открывает.",
     ),
     Preset(
-        key="the_finals",
-        title="The Finals",
-        strategy="general (ALT11).bat",
-        game_filter="all", ipset="any",
-        exclude_domains=SAFE_EXCLUDE + ("embark.io", "api.embark.io"),
-        exclude_ips=("34.49.47.233/32",),
-        general_domains=(),
-        description="Игровые порты TCP и UDP открыты: серверы матча идут "
-                    "за пределами стандартных диапазонов zapret (443 и "
-                    "диапазоны Discord/Stun). Бэкенд Embark отвечает и без "
-                    "обхода, поэтому в исключениях и по домену, и по IP: "
-                    "правила игрового фильтра не читают hostlist-exclude, "
-                    "только ipset-exclude. Домены самой игры припаркованы "
-                    "(лендер «for sale») и в пробах не участвуют.",
-    ),
-    Preset(
         key="games_max",
         title="Максимум для игр",
         strategy="general (ALT11).bat",

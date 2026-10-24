@@ -253,7 +253,7 @@ def op_ab(args: list[str]) -> int:
         if scripted():
             print("укажите группу: debug.bat F ea")
             return 2
-        group = _ask("Группа целей (discord|youtube|ea|ubisoft|finals):") or "ubisoft"
+        group = _ask("Группа целей (discord|youtube|ea|ubisoft):") or "ubisoft"
     return _run([PY, "tests/run_ab.py"], [group])
 
 

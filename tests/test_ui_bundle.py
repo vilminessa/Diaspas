@@ -42,9 +42,8 @@ def test_index_has_required_structure():
         'id="btn-select-apply"',
         # подпись сборки в статус-баре
         'id="app-version"',
-        # группа The Finals в A/B-селекторе и IP-исключения в подтверждении
-        # пресета (без них игровая группа и CIDR-защита в UI не видны)
-        'value="finals"',
+        # IP-исключения в подтверждении пресета (без них защита адреса в UI
+        # не видна: игровые фильтры читают только ipset-exclude)
         'IP-исключения',
     ):
         assert marker in INDEX_HTML, f"нет {marker}"

@@ -14,6 +14,7 @@ from core.presets import (  # noqa: E402
     Preset,
     apply_files,
     current_preset,
+    load_presets,
 )
 from core.service import ServiceState  # noqa: E402
 
@@ -126,3 +127,69 @@ def test_current_preset_none_for_off(tmp_path):
                          strategy="", pid=0, binpath="")
     found = current_preset(root, state)
     assert found is not None and found.off
+
+
+def test_ip_exclude_cidr_written_once(tmp_path):
+    """CIDR в ipset-exclude-user.txt: один раз, заглушка и чужие строки целы.
+
+    Правила игрового фильтра читают только ipset-exclude, поэтому доменное
+    исключение для них ничего не значит - защита адреса возможна только IP.
+    """
+    root = make_root(tmp_path)
+    preset = Preset(key="t", title="T", strategy="general (ALT11).bat",
+                    game_filter="all", ipset="any",
+                    exclude_ips=("34.49.47.233/32",))
+    apply_files(root, preset)
+    apply_files(root, preset)          # повторное применение не дублирует
+    text = (root / "lists" / "ipset-exclude-user.txt").read_text(
+        encoding="utf-8")
+    assert text.count("34.49.47.233/32") == 1, text
+    assert "203.0.113.113/32" in text   # заглушка не затёрта
+    assert "# Diaspas" in text          # пометка авторства вставки
+
+
+def test_preset_not_matched_when_ip_exclude_missing(tmp_path):
+    """CIDR не записан - подсветка не должна обещать защищённый адрес."""
+    root = make_root(tmp_path)
+    preset = Preset(key="t", title="T", strategy="general (ALT11).bat",
+                    game_filter="all", ipset="any",
+                    exclude_ips=("1.2.3.4/32",))
+    apply_files(root, preset)
+    (root / "lists" / "ipset-exclude-user.txt").write_text(
+        "203.0.113.113/32\r\n", encoding="ascii")
+    state = ServiceState(installed=True, running=True, start_type="Automatic",
+                         strategy="general (ALT11)", pid=1, binpath="...")
+    found = current_preset(root, state, presets=[preset])
+    assert found is None, "CIDR не записан - пресет не должен подсвечиваться"
+
+
+def test_ip_exclude_makes_preset_more_specific(tmp_path):
+    """Режимы одинаковы, но пресет с CIDR конкретнее - он и подсвечивается."""
+    root = make_root(tmp_path)
+    broad = Preset(key="broad", title="Broad", strategy="general (ALT11).bat",
+                   game_filter="all", ipset="any")
+    exact = Preset(key="exact", title="Exact", strategy="general (ALT11).bat",
+                   game_filter="all", ipset="any", exclude_ips=("9.9.9.9/32",))
+    apply_files(root, exact)
+    state = ServiceState(installed=True, running=True, start_type="Automatic",
+                         strategy="general (ALT11)", pid=1, binpath="...")
+    found = current_preset(root, state, presets=[broad, exact])
+    assert found is not None and found.key == "exact", found
+
+
+def test_custom_preset_reads_exclude_ips(tmp_path, monkeypatch):
+    from core import paths
+
+    settings = {"presets": [{"key": "custom", "title": "Custom",
+                             "strategy": "general (ALT11).bat",
+                             "game_filter": "all", "ipset": "any",
+                             "exclude_ips": ["9.9.9.0/24"],
+                             "description": ""}]}
+    monkeypatch.setattr(paths, "read_settings", lambda: settings)
+    custom = next(p for p in load_presets() if p.key == "custom")
+    assert custom.exclude_ips == ("9.9.9.0/24",)
+    root = make_root(tmp_path)
+    apply_files(root, custom)
+    assert "9.9.9.0/24" in (root / "lists" /
+                            "ipset-exclude-user.txt").read_text(
+        encoding="utf-8")

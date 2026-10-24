@@ -111,15 +111,15 @@ python -m PyInstaller diaspas.spec
 | Discord / YouTube | ALT11 | — | — | — |
 | Apex / EA | ALT11 | all | any | `ea.com` в исключения |
 | Ubisoft | ALT11 | all | any | `ubisoft.com`, `ubi.com` в исключения |
-| The Finals | ALT11 | all | any | `embark.io` в исключения домена и `34.49.47.233/32` в `ipset-exclude-user.txt` |
 | Максимум для игр | ALT11 | all | any | — |
 | Выкл | — | — | — | — |
 
-Правила игрового фильтра (`--filter-tcp=%GameFilterTCP%`,
-`--filter-udp=%GameFilterUDP%`) не читают `--hostlist-exclude`, поэтому
-для защиты бэкенда игры от десинка нужен IP: доменное исключение в них
-не работает. CIDR пишется в `ipset-exclude-user.txt` один раз и не затирает
-чужие строки.
+Дополнительная опция пресета — `exclude_ips` (CIDR в
+`ipset-exclude-user.txt`): правила игрового фильтра
+(`--filter-tcp=%GameFilterTCP%`, `--filter-udp=%GameFilterUDP%`) не читают
+`--hostlist-exclude`, поэтому доменное исключение в них не работает и адрес
+защищается только IP. CIDR пишется один раз и не затирает чужие строки;
+опция доступна и пользовательским пресетам в `settings.json`.
 
 ## Управление правами
 
@@ -186,7 +186,7 @@ debug.bat Q            # файлы, на которые ссылается Bina
 debug.bat A            # список стратегий и активная
 debug.bat B "general (ALT7).bat"   # сменить стратегию вручную (UAC)
 debug.bat C            # автоцикл: пробы + подбор + применение (UAC)
-debug.bat F ea         # A/B-тест группы (discord|youtube|ea|ubisoft|finals)
+debug.bat F ea         # A/B-тест группы
 debug.bat G            # служебные задачи UAC
 debug.bat I --yes      # переустановка релиза без вопроса
 debug.bat J            # собрать exe + smoke-прогон
@@ -223,7 +223,7 @@ v0.1.2`). Релизы и беты GitHub собирает сам по тегу 
 
 Реализовано: установка релизов с GitHub, пресеты,
 управление службой (один UAC), пробы Discord/YouTube/EA/
-Ubisoft/The Finals, A/B-диагностика, перебор стратегий, ручная и
+Ubisoft, A/B-диагностика, перебор стратегий, ручная и
 автоматическая смена стратегии, версионирование и полосы
 выпуска (beta/release, SLSA-провенанс), консоль проекта
 `debug.bat`, GUI.
@@ -233,17 +233,6 @@ Ubisoft/The Finals, A/B-диагностика, перебор стратеги�
 чинит `account.ubisoft.com` (было 2/3 → стало 3/3);
 автоподбор на этой машине закрыл цели ALT4 (11/11), а
 ALT11 и ALT12 — нет, и обход переключился на ALT4 сам.
-
-The Finals: web-домены игры припаркованы (`thefinals.com` —
-лендер «for sale» на GoDaddy/AWS, `finals.game` — Gandi), а
-зона `thefinals.com` имеет wildcard, поэтому `api.`/`cdn.`/
-`status.` резолвятся, но TLS отвечает «unrecognized name» —
-это мёртвый хост, а не DPI (A/B: одинаково с обходом и без).
-Живой бэкенд — платформа Embark: `api.embark.io` (GCP),
-`events.embark.io` (Vercel), `embark.io` (Firebase); все три
-отвечают и без обхода, поэтому входят в исключения пресета
-«The Finals». UDP-серверы матча с этого ПК не видны — их
-нужно замерять на игровом ПК (`netstat`/`Get-NetUDPConnection`).
 
 ## Лицензия
 

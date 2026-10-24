@@ -77,10 +77,7 @@ CI не гоняются — они живые (`tests/run_*`, `tests/integratio
 
 ## Живые прогоны
 
-- `tests/run_probes.py`, `tests/run_ab.py <группа>` — сеть; группа `finals`
-  цели живого бэкенда Embark (`api`/`events`/`web`), припаркованные домены
-  игры в `PROBE_GROUPS` не входят — их TLS отвечает «unrecognized name» и
-  это выглядело бы как поломка обхода;
+- `tests/run_probes.py`, `tests/run_ab.py <группа>` — сеть;
 - `tests/run_strategy.py --list | "<файл>" | --auto` — смена стратегии;
   автоцикл гасит `winws` между стратегиями и возвращает обход;
 - `tests/run_select.py` — полный перебор (UAC, минуты);
