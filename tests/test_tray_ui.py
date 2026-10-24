@@ -36,10 +36,14 @@ class FakeWindow:
 class FakeTray:
     """core.tray.Tray без Win32: отмечает update/notify/quit."""
 
-    def __init__(self, spec=None, on_action=None) -> None:
+    def __init__(self, spec=None, on_action=None, uid: int = 1,
+                 log=None) -> None:
         self.spec = spec
         self.on_action = on_action
+        self.uid = uid
+        self.log = log
         self.hwnd = 4242
+        self.icon_kind = "метка"
         self.updates = 0
         self.notices: list[tuple[str, str]] = []
         self.quit_called = False

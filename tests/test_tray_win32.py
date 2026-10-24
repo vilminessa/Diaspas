@@ -63,32 +63,24 @@ def test_start_times_out_if_thread_never_ready(monkeypatch, tmp_path):
     assert "не поднялся" in res["error"]
 
 
-def test_icon_handle_is_a_system_sign(monkeypatch, tmp_path):
-    """HICON реальным вызовом: десктоп не нужен, handle системный."""
+def test_icon_handle_is_the_mark_when_dotnet_works(monkeypatch, tmp_path):
+    """Метка из temp-ICO: handle валиден, keepalive держит .NET Icon."""
     monkeypatch.setattr(paths, "app_dir", lambda: tmp_path)
-    icon = tray._make_hicon("warn")
-    assert icon
-    # повторный вызов того же состояния даёт тот же handle: ресурс не копится
-    assert tray._make_hicon("warn") == icon
-    assert tray._make_hicon("err") != icon
+    keep = object()
+    monkeypatch.setattr(tray, "_dotnet_hicon",
+                        lambda state: (12345, keep) if state in tray.ICON_TINTS
+                        else None)
+    icon, got = tray._make_hicon("ok")
+    assert icon == 12345 and got is keep
+    # cache: тот же handle и тот же объект при повторном запросе
+    again = tray._dotnet_hicon("ok")
+    assert again == (12345, keep)
 
 
-def test_icon_handles_are_all_states(monkeypatch, tmp_path):
-    """Все четыре состояния выходят значками: трей не рисует пустоту."""
+def test_icon_handle_falls_back_to_system_sign(monkeypatch, tmp_path):
+    """.NET недоступен -> системный значок по состоянию, keepalive None."""
     monkeypatch.setattr(paths, "app_dir", lambda: tmp_path)
-    handles = {name: tray._make_hicon(name) for name in tray.ICON_RESOURCES}
-    assert all(handles), handles
-    assert len(set(handles.values())) == 4
-
-
-def test_icon_handle_none_when_load_refuses(monkeypatch):
-    """LoadIconW вернул NULL -> None: NotifyIcon без иконки, а не битая."""
-    monkeypatch.setattr(tray.user32, "LoadIconW", lambda *_a: None)
-    assert tray._make_hicon("ok") is None
-
-
-def test_unknown_icon_state_falls_back_to_application_sign(monkeypatch):
-    """Неизвестное состояние -> IDI_APPLICATION, а не исключение KeyError."""
+    monkeypatch.setattr(tray, "_dotnet_hicon", lambda _state: None)
     loaded: list[int] = []
 
     def fake_load(_instance, resource):
@@ -96,12 +88,49 @@ def test_unknown_icon_state_falls_back_to_application_sign(monkeypatch):
         return 4242
 
     monkeypatch.setattr(tray.user32, "LoadIconW", fake_load)
-    assert tray._make_hicon("bogus") == 4242
+    icon, keep = tray._make_hicon("warn")
+    assert icon == 4242 and keep is None
+    assert loaded == [tray.ICON_RESOURCES["warn"]]
+
+
+def test_icon_handles_for_every_state(monkeypatch):
+    """Все состояния дают и инк метки, и системный значок: трей не пустой."""
+    assert set(tray.ICON_TINTS) == set(tray.ICON_RESOURCES) == {"ok", "warn", "err", "off"}
+    assert len(set(tray.ICON_TINTS.values())) == 4, "состояния не различаются"
+    assert len(set(tray.ICON_RESOURCES.values())) == 4, "значки не различаются"
+    monkeypatch.setattr(tray, "_dotnet_hicon", lambda _state: None)
+    seen: list[int] = []
+
+    def fake_load(_instance, resource):
+        seen.append(int(resource))
+        return 1000 + int(resource)
+
+    monkeypatch.setattr(tray.user32, "LoadIconW", fake_load)
+    handles = {state: tray._make_hicon(state)[0] for state in tray.ICON_RESOURCES}
+    assert all(handles), handles
+    assert len(set(handles.values())) == 4
+
+
+def test_unknown_icon_state_falls_back_to_off(monkeypatch):
+    """Неизвестное состояние -> инк и значок «выключен», без KeyError."""
+    monkeypatch.setattr(tray, "_dotnet_hicon", lambda _state: None)
+    loaded: list[int] = []
+    monkeypatch.setattr(tray.user32, "LoadIconW",
+                        lambda _i, resource: (loaded.append(int(resource)) or 4242))
+    icon, _keep = tray._make_hicon("bogus")
+    assert icon == 4242
     assert loaded == [tray.ICON_RESOURCES["off"]]
 
 
-def test_refresh_does_not_destroy_system_handles(monkeypatch, tmp_path):
-    """Смена значка не вызывает DestroyIcon: handle принадлежит Windows."""
+def test_icon_handle_none_when_load_refuses(monkeypatch):
+    """LoadIconW вернул NULL -> None: NotifyIcon без иконки, а не битая."""
+    monkeypatch.setattr(tray, "_dotnet_hicon", lambda _state: None)
+    monkeypatch.setattr(tray.user32, "LoadIconW", lambda *_a: None)
+    assert tray._make_hicon("ok") == (None, None)
+
+
+def test_refresh_never_destroys_icon_handles(monkeypatch, tmp_path):
+    """Смена состояния не DestroyIcon: handle системный или принадлежит .NET."""
     monkeypatch.setattr(paths, "app_dir", lambda: tmp_path)
     destroyed: list[int] = []
 
@@ -119,12 +148,15 @@ def test_refresh_does_not_destroy_system_handles(monkeypatch, tmp_path):
 
     monkeypatch.setattr(tray, "user32", FakeUser())
     monkeypatch.setattr(tray, "shell32", FakeShell())
+    monkeypatch.setattr(tray, "_dotnet_hicon", lambda _state: None)
     holder = tray.Tray(spec, lambda _a: None)
     holder._hwnd = 1
     holder._icon = 999
     holder._refresh_icon()
     assert destroyed == []          # системный значок DestroyIcon не трогает
     assert holder._icon == 1000 + tray.ICON_RESOURCES[spec().icon_state]
+    holder._remove_icon()
+    assert destroyed == []          # и при съезде иконки тоже
 
 
 def test_claim_singleton_wakes_the_owner(monkeypatch, tmp_path):
@@ -221,8 +253,65 @@ def test_claim_singleton_reports_mutex_error(monkeypatch):
     assert "CreateMutexW" in res["error"]
 
 
+def test_tray_events_route_right_click_to_menu(monkeypatch):
+    """Правый клик - меню, левый/двойной/клик по уведомлению - окно.
+
+    Regression: WM_RBUTTONUP=0x0205 был записан как balloon-код, и правый
+    клик открывал окно вместо меню.
+    """
+    opened: list[str] = []
+    holder = tray.Tray(spec, lambda action: opened.append(action))
+    holder._hwnd = 1
+    holder._open_menu = lambda _hwnd: opened.append("menu")   # без создания окон
+
+    holder._on_message(1, tray.WM_TRAY, 0, tray.WM_RBUTTONUP)
+    assert opened == ["menu"]
+    opened.clear()
+    holder._on_message(1, tray.WM_TRAY, 0, tray.WM_RBUTTONDBLCLK)
+    assert opened == ["menu"]
+    opened.clear()
+    holder._on_message(1, tray.WM_TRAY, 0, tray.WM_CONTEXTMENU)
+    assert opened == ["menu"]
+    opened.clear()
+
+    for code in (tray.WM_LBUTTONUP, tray.WM_LBUTTONDBLCLK, tray.NIN_SELECT,
+                 tray.NIN_KEYSELECT, tray.NIN_BALLOONUSERCLICK):
+        holder._on_message(1, tray.WM_TRAY, 0, code)
+    assert opened == [tray.SHOW] * 5
+
+    opened.clear()
+    # нажатие (не релиз) не открывает меню и не показывает окно
+    holder._on_message(1, tray.WM_TRAY, 0, tray.WM_RBUTTONDOWN)
+    holder._on_message(1, tray.WM_TRAY, 0, tray.WM_LBUTTONDOWN)
+    holder._on_message(1, tray.WM_TRAY, 0, tray.WM_USER + 2)   # balloon show
+    holder._on_message(1, tray.WM_TRAY, 0, tray.WM_USER + 4)   # balloon timeout
+    assert opened == []
+
+
+def test_button_message_constants_match_msdn():
+    """Разряды мышиных сообщений: правый релиз 0x0205, balloon 0x0405."""
+    assert tray.WM_LBUTTONDOWN == 0x0201
+    assert tray.WM_LBUTTONUP == 0x0202
+    assert tray.WM_LBUTTONDBLCLK == 0x0203
+    assert tray.WM_RBUTTONDOWN == 0x0204
+    assert tray.WM_RBUTTONUP == 0x0205
+    assert tray.WM_RBUTTONDBLCLK == 0x0206
+    assert tray.WM_CONTEXTMENU == 0x007E
+    # NIN_* это WM_USER + n, а не сообщения мыши: 0x0205 - правый релиз
+    assert tray.NIN_SELECT == tray.WM_USER + 0
+    assert tray.NIN_BALLOONUSERCLICK == tray.WM_USER + 5
+    assert tray.NIN_BALLOONUSERCLICK != tray.WM_RBUTTONUP
+
+
+def test_notify_icon_uses_classic_version():
+    """uVersion=0: lParam приходит как mouse-сообщение, balloon - WM_LBUTTONUP."""
+    data = tray.Tray(spec, lambda _a: None)._icon_data(tray.NIF_MESSAGE | tray.NIF_ICON)
+    assert data.uVersion == 0
+    assert data.uTimeout == 4000
+
+
 def test_menu_maps_commands_back_to_action_ids(monkeypatch):
-    """id пункта возвращаются по команде TrackPopupMenu - порядок не важен."""
+    """Резервный нативный меню: id пункта возвращаются по команде TrackPopupMenu."""
     sent: list[tuple[int, int, object, str]] = []
     menus: list[int] = []
 
@@ -257,7 +346,7 @@ def test_menu_maps_commands_back_to_action_ids(monkeypatch):
     actions: list[str] = []
     holder = tray.Tray(spec, actions.append)
     holder._hwnd = 1
-    holder._popup_menu(1)
+    holder._popup_menu_native(1)
 
     labels = [entry[3] for entry in sent if entry[3]]
     assert labels[:2] == ["Открыть окно", "Скрыть окно"]

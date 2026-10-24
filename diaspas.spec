@@ -18,6 +18,12 @@ spec_dir = globals().get("SPECPATH") or os.getcwd()
 sys.path.insert(0, spec_dir)
 from version import BUILD_LABEL, __version__  # noqa: E402
 
+# Иконка exe и панели задач: монохромная метка из core.icons (генерируется
+# tools/render_icon.py). Если ассета нет (деревье без assets), сборка идёт без
+# иконки - это не ошибка сборки.
+_icon_path = os.path.join(spec_dir, "assets", "icon.ico")
+_icon = _icon_path if os.path.isfile(_icon_path) else None
+
 _components = [int(part) for part in __version__.split(".")]
 _v4 = tuple(_components[:4]) + (0,) * (4 - len(_components))
 
@@ -96,4 +102,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     version=_version_file,
+    icon=_icon,
 )

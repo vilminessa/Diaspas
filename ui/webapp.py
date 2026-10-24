@@ -26,7 +26,7 @@ from pathlib import Path
 import webview
 
 import version
-from core import abtest, autoselect, autoswitch, log as dlog, paths, presets as presets_mod
+from core import abtest, autoselect, autoswitch, icons, log as dlog, paths, presets as presets_mod
 from core import probes, release, service, strategies as strategies_mod, tray
 from i18n import tr
 from ui.bundle import INDEX_HTML
@@ -88,6 +88,7 @@ class App:
         self.tray: tray.Tray | None = None
         self.window_hidden = False
         self._tray_busy: set[str] = set()
+        self._icon_done = False     # иконка окна ставится один раз (в hello)
 
     # -- журнал --------------------------------------------------------
 
@@ -101,9 +102,14 @@ class App:
         """Вызывается JS при инициализации: доказательство живости моста.
 
         Если в журнале нет этой строки - окно нарисовалось, но api не
-        отвечает (типичная поломка после рефакторинга моста).
+        отвечает (типичная поломка после рефакторинга моста). Здесь же
+        ставится иконка окна: к этому моменту форма WinForms уже существует
+        (в bootstrap `win.native` ещё None).
         """
         self.log("info", "фронтенд подключился: мост JS<->Python работает")
+        if self.window is not None and not self._icon_done:
+            self._icon_done = True
+            _set_window_icon(self.window, self.log)
         return {"ok": True, "app": "Diaspas", "ui": "webview",
                 "label": version.label()}
 
@@ -562,12 +568,13 @@ class App:
         """Поднять иконку. Мягкий отказ: GUI ведёт себя как без трея."""
         if self.tray:
             return {"ok": True, "hwnd": self.tray.hwnd}
-        holder = tray.Tray(self.tray_spec, self.tray_action)
+        holder = tray.Tray(self.tray_spec, self.tray_action,
+                           log=lambda text: self.log("warning", text))
         res = holder.start()
         if res.get("ok"):
             self.tray = holder
             self.log("info",
-                     f"трей: иконка зарегистрирована (hwnd={res.get('hwnd')})")
+                     f"трей: иконка зарегистрирована (hwnd={res.get('hwnd')}, {holder.icon_kind})")
         else:
             self.log("warning", tr("tray.unavailable",
                                    reason=res.get("error") or "неизвестно"))
@@ -595,6 +602,30 @@ class App:
         return {"ok": True, "tray": flag}
 
 
+def _set_window_icon(win, log) -> None:
+    """Иконка окна и панели задач: pywebview на Windows её из create_window не берёт.
+
+    Форма WinForms получает .NET Icon из temp-ICO (та же метка, что в трее),
+    поэтому значок одинаков и в прогоне из исходников (иконка python.exe
+    иначе), и в exe. Если pythonnet не поднялся - молчим: окно работает без
+    собственной иконки.
+    """
+    try:
+        import clr
+        clr.AddReference("System.Drawing")
+        import System.Drawing as sd
+        from System.IO import FileStream, FileMode
+        native = getattr(win, "native", None)
+        if native is None:
+            log("warning", "иконка окна: форма ещё не создана (native=None)")
+            return
+        native.Icon = sd.Icon(FileStream(
+            str(icons.temp_ico_file(icons.WINDOW_INK)), FileMode.Open))
+        log("info", "иконка окна: метка из ICO")
+    except Exception:  # noqa: BLE001 - иконка окна не валит GUI
+        log("exception", "иконка окна")
+
+
 def run() -> int:
     """Создать окно и отдать управление pywebview.
 
@@ -609,7 +640,8 @@ def run() -> int:
 
     holder: tray.Tray | None = None
     if tray.enabled():
-        holder = tray.Tray(app.tray_spec, app.tray_action)
+        holder = tray.Tray(app.tray_spec, app.tray_action,
+                           log=lambda text: app.log("warning", text))
         claim = holder.claim_singleton()
         if not claim.get("ok"):
             app.log("warning", f"трей: {claim.get('error')}")
@@ -679,7 +711,7 @@ def run() -> int:
             if res.get("ok"):
                 app.tray = holder
                 app.log("info",
-                        f"трей: иконка зарегистрирована (hwnd={res.get('hwnd')})")
+                        f"трей: иконка зарегистрирована (hwnd={res.get('hwnd')}, {holder.icon_kind})")
                 app.tray_update()
             else:
                 app.log("warning", tr("tray.unavailable",

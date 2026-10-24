@@ -18,7 +18,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import version
 from core import abtest, autoselect, autoswitch, presets as presets_mod, probes, release, service
-from core import log as dlog
+from core import icons, log as dlog
 from core import paths, strategies as strategies_mod, tray
 from i18n import tr
 
@@ -50,6 +50,7 @@ class App(tk.Tk):
         self._build()
         self.log("info", f"запуск интерфейса (Tkinter) - сборка {version.label()}")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._set_icon()
         self.after(120, self._pump)
         self.after(200, self._initial_state)
 
@@ -193,6 +194,18 @@ class App(tk.Tk):
             self._append_log("old", line)
 
     # -- журнал и мост потоков ---------------------------------------------
+
+    def _set_icon(self) -> None:
+        """Значок окна и панели задач: ICO той же метки, что в трее.
+
+        Tk грузит .ico сам (не нашим ctypes-клэем), поэтому путь temp-файла
+        достаточно. Отказ (нет десктопа, кривой ICO) - только журнал.
+        """
+        try:
+            self.iconbitmap(str(icons.temp_ico_file(icons.WINDOW_INK)))
+            self.log("info", "иконка окна: метка из ICO")
+        except Exception:  # noqa: BLE001 - иконка окна не валит GUI
+            dlog.exception("иконка окна")
 
     def log(self, level: str, text: str) -> None:
         """Потокобезопасная запись: в окно (очередь) и на диск.
@@ -854,12 +867,13 @@ class App(tk.Tk):
         """Поднять иконку; мягкий отказ - GUI работает как без трея."""
         if self._tray:
             return {"ok": True, "hwnd": self._tray.hwnd}
-        holder = tray.Tray(self._tray_spec, self.tray_action)
+        holder = tray.Tray(self._tray_spec, self.tray_action,
+                           log=lambda text: self.log("warning", text))
         res = holder.start()
         if res.get("ok"):
             self._tray = holder
             self.log("info",
-                     f"трей: иконка зарегистрирована (hwnd={res.get('hwnd')})")
+                     f"трей: иконка зарегистрирована (hwnd={res.get('hwnd')}, {holder.icon_kind})")
             self._tray_note.set(tr("tray.note"))
             self._tray_hide_btn.configure(state="normal")
         else:
@@ -996,7 +1010,9 @@ def main(hidden: bool = False) -> int:
     """
     app = App()
     if tray.enabled():
-        claim = tray.Tray(app._tray_spec, app.tray_action).claim_singleton()
+        claim = tray.Tray(app._tray_spec, app.tray_action,
+                          log=lambda text: app.log("warning", text)
+                          ).claim_singleton()
         if claim.get("ok") and not claim.get("owner"):
             app.log("info", tr("tray.second_instance"))
             app.destroy()

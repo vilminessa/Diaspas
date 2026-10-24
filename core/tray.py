@@ -33,18 +33,22 @@ import typing
 from dataclasses import dataclass
 from typing import Callable
 
+from . import icons
 from . import paths
+from . import tray_menu
 
-# Иконка трея: системные значки Windows по состоянию. Своё изображение здесь
-# не выходит - проверено живыми пробами: ``CreateIcon`` с 32-битными битами
-# рисует чёрное (``DrawIconEx`` + ``GetPixel`` даёт R=G=B=0),
-# ``CreateIconIndirect`` с 1-битной DIB-маской возвращает NULL без кода
-# ошибки, ``CreateBitmap`` с переданными битами - тоже NULL, а ``LoadImageW``
-# по ICO (и наш ICO, и образцовый из Pillow) рушится в access violation.
-# Системные значки документированы и различимы: error - красный крест,
-# warning - янтарный треугольник, information - синяя «i», application -
-# нейтральный. Handle принадлежит системе и переиспользуется, поэтому
+# Иконка трея: наша монохромная метка (:mod:`core.icons`) с инком по состоянию.
+# HICON для неё даёт .NET (pythonnet читает temp-ICO) - свой растер через GDI
+# здесь не выходит, проверено живыми пробами: ``CreateIcon`` с 32-битными
+# битами рисует чёрное (``DrawIconEx`` + ``GetPixel`` даёт R=G=B=0),
+# ``CreateIconIndirect`` с 1-битной DIB-маской возвращает NULL без кода ошибки,
+# ``CreateBitmap`` с переданными битами - тоже NULL, а ``LoadImageW`` по ICO
+# (и наш ICO, и образцовый из Pillow) рушится в access violation.
+# Fallback, если .NET недоступен (Tk-резерв без pythonnet) - системные значки
+# Windows: error - красный крест, warning - янтарный треугольник, information -
+# синяя «i», application - нейтральный. Их handle принадлежит системе, поэтому
 # DestroyIcon к нему применять нельзя.
+ICON_TINTS: dict[str, tuple[int, int, int]] = icons.TINTS
 ICON_RESOURCES: dict[str, int] = {
     "ok": 32516,      # IDI_INFORMATION
     "warn": 32515,    # IDI_WARNING
@@ -297,158 +301,107 @@ def handle(action: str, ops: Ops) -> dict:
 # -- Win32-клей ------------------------------------------------------------
 
 if sys.platform == "win32":
-    user32 = ctypes.windll.user32
-    shell32 = ctypes.windll.shell32
-    kernel32 = ctypes.windll.kernel32
+    # Клей объявлен в core.win32 один раз: общий ctypes.windll.user32 принимает
+    # argtypes того модуля, который объявил их последним, и два модуля со
+    # своими POINT/WNDCLASSEXW мешают друг другу (живая проба:
+    # "expected LP_POINT instance instead of pointer to POINT").
+    from . import win32
 
+    user32 = win32.user32
+    shell32 = win32.shell32
+    kernel32 = win32.kernel32
     WM_TRAY = user32.RegisterWindowMessageW("DiaspasTray")
     WM_UPDATE = user32.RegisterWindowMessageW("DiaspasTrayUpdate")
     WM_SHOW = user32.RegisterWindowMessageW("DiaspasTrayShow")
     WM_QUIT_TRAY = user32.RegisterWindowMessageW("DiaspasTrayQuit")
 
-    WM_NULL = 0x0000
-    WM_DESTROY = 0x0002
-    WM_LBUTTONUP = 0x0202
-    WM_LBUTTONDBLCLK = 0x0203
-    WM_RBUTTONUP = 0x0204
-    WM_CONTEXTMENU = 0x007E
-    NIN_BALLOONUSERCLICK = 0x0205
+    # Сообщения, флаги и структуры - из win32 (одинаковые для обоих модулей).
+    VP = win32.VP
+    WNDPROC = win32.WNDPROC
+    POINT = win32.POINT
+    MSG = win32.MSG
+    RECT = win32.RECT
+    WNDCLASSEXW = win32.WNDCLASSEXW
+    NOTIFYICONDATAW = win32.NOTIFYICONDATAW
 
-    NIF_MESSAGE = 0x0001
-    NIF_ICON = 0x0002
-    NIF_TIP = 0x0004
-    NIF_INFO = 0x0010
-    NIM_ADD = 0x00000000
-    NIM_MODIFY = 0x00000001
-    NIM_DELETE = 0x00000002
+    WM_NULL = win32.WM_NULL
+    WM_DESTROY = win32.WM_DESTROY
+    WM_LBUTTONDOWN = win32.WM_LBUTTONDOWN
+    WM_LBUTTONUP = win32.WM_LBUTTONUP
+    WM_LBUTTONDBLCLK = win32.WM_LBUTTONDBLCLK
+    WM_RBUTTONDOWN = win32.WM_RBUTTONDOWN
+    WM_RBUTTONUP = win32.WM_RBUTTONUP        # 0x0205, не 0x0204
+    WM_RBUTTONDBLCLK = win32.WM_RBUTTONDBLCLK
+    WM_CONTEXTMENU = win32.WM_CONTEXTMENU
+    WM_USER = win32.WM_USER
+    NIN_SELECT = win32.NIN_SELECT
+    NIN_KEYSELECT = win32.NIN_KEYSELECT
+    NIN_BALLOONUSERCLICK = win32.NIN_BALLOONUSERCLICK   # WM_USER + 5, не 0x0205
 
-    MF_STRING = 0x0000
-    MF_GRAYED = 0x0002
-    MF_CHECKED = 0x0008      # тот же разряд, что MF_SEPARATOR: различаются
-    MF_SEPARATOR = 0x0008    # наличием/отсутствием строки и item id
-    MF_POPUP = 0x0010
+    NIF_MESSAGE = win32.NIF_MESSAGE
+    NIF_ICON = win32.NIF_ICON
+    NIF_TIP = win32.NIF_TIP
+    NIF_INFO = win32.NIF_INFO
+    NIM_ADD = win32.NIM_ADD
+    NIM_MODIFY = win32.NIM_MODIFY
+    NIM_DELETE = win32.NIM_DELETE
 
-    TPM_RETURNCMD = 0x0100
-    TPM_LEFTALIGN = 0x0000
-    TPM_BOTTOMALIGN = 0x0020
+    MF_STRING = win32.MF_STRING
+    MF_GRAYED = win32.MF_GRAYED
+    MF_CHECKED = win32.MF_CHECKED
+    MF_SEPARATOR = win32.MF_SEPARATOR
+    MF_POPUP = win32.MF_POPUP
+    TPM_RETURNCMD = win32.TPM_RETURNCMD
+    TPM_LEFTALIGN = win32.TPM_LEFTALIGN
+    TPM_BOTTOMALIGN = win32.TPM_BOTTOMALIGN
 
-    WS_POPUP = 0x00000000
-    WS_EX_TOOLWINDOW = 0x00000080
-    ERROR_ALREADY_EXISTS = 183
-    MB_YESNO = 0x0004
-    IDYES = 6
-    IDNO = 7
+    WS_POPUP = win32.WS_POPUP
+    WS_EX_TOOLWINDOW = win32.WS_EX_TOOLWINDOW
+    ERROR_ALREADY_EXISTS = win32.ERROR_ALREADY_EXISTS
+    MB_YESNO = win32.MB_YESNO
+    IDYES = win32.IDYES
+    IDNO = win32.IDNO
 
-    # Указатель и LRESULT - на x64 это 64-битные типы: без них ctypes вернёт int
-    # и указатели (hwnd, hIcon, hCursor) потеряются.
-    VP = ctypes.c_void_p
-    LRESULT = ctypes.c_ssize_t
-    WNDPROC = ctypes.WINFUNCTYPE(LRESULT, VP, ctypes.c_uint, VP, VP)
+    # Кэш handle'ов метки по состоянию: Icon (.NET) владеет своим HICON, поэтому
+    # объект держим - иначе финализатор DestroyIcon'ом убьёт иконку трея.
+    _icon_cache: dict[str, tuple[int, object]] = {}
 
-    class POINT(ctypes.Structure):
-        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+    def _dotnet_hicon(state: str) -> tuple[int, object] | None:
+        """HICON монохромной метки из temp-ICO (pythonnet). None - .NET не вышел."""
+        cached = _icon_cache.get(state)
+        if cached:
+            return cached
+        try:
+            import clr
+            clr.AddReference("System.Drawing")
+            import System.Drawing as sd
+            from System.IO import FileStream, FileMode
+        except Exception:      # noqa: BLE001 - pythonnet не установлен / не инициализирован
+            return None
+        rgb = ICON_TINTS.get(state, ICON_TINTS["off"])
+        try:
+            icon = sd.Icon(FileStream(str(icons.temp_ico_file(rgb)),
+                                       FileMode.Open))
+            handle = int(icon.Handle.ToInt64())
+        except Exception:      # noqa: BLE001 - ICO не прочитался
+            return None
+        if not handle:
+            return None
+        _icon_cache[state] = (handle, icon)
+        return _icon_cache[state]
 
-    class MSG(ctypes.Structure):
-        _fields_ = [("hwnd", VP), ("message", ctypes.c_uint),
-                    ("wParam", VP), ("lParam", VP),
-                    ("lpt", ctypes.c_uint), ("pt", POINT)]
+    def _make_hicon(name: str) -> tuple[int | None, object | None]:
+        """(hIcon, keepalive): метка, если .NET вышел; иначе системный значок.
 
-    class NOTIFYICONDATAW(ctypes.Structure):
-        _fields_ = [("cbData", ctypes.c_uint), ("hwnd", ctypes.c_void_p),
-                    ("uid", ctypes.c_uint), ("uFlags", ctypes.c_uint),
-                    ("callback", ctypes.c_uint), ("hIcon", ctypes.c_void_p),
-                    ("uTimeout", ctypes.c_ushort), ("uVersion", ctypes.c_ushort),
-                    # c_wchar - UTF-16 на Windows: arrays этого типа лежат как
-                    # wchar_t[] в структуре
-                    ("szTip", ctypes.c_wchar * 64),
-                    ("dwState", ctypes.c_uint), ("dwStateItem", ctypes.c_uint),
-                    ("szInfo", ctypes.c_wchar * 256),
-                    ("dwInfoTimeout", ctypes.c_uint),
-                    ("szInfoTitle", ctypes.c_wchar * 64),
-                    ("dwInfoFlags", ctypes.c_uint)]
-
-    class WNDCLASSEXW(ctypes.Structure):
-        # порядок поля реальный: hClassMenu идёт ПОСЛЕ lpszClassName.
-        # С «красивым» порядком Windows читает lpszClassName как мусор и
-        # отказывает с ERROR_INVALID_PARAMETER (87).
-        _fields_ = [("cbSize", ctypes.c_uint), ("style", ctypes.c_uint),
-                    ("lpfnWndProc", WNDPROC),
-                    ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
-                    ("hInstance", VP), ("hIcon", VP), ("hCursor", VP),
-                    ("hBackground", VP), ("hMenuName", ctypes.c_wchar_p),
-                    ("lpszClassName", ctypes.c_wchar_p),
-                    ("hClassMenu", VP)]
-
-    # Без argtypes/restype ctypes возвращает int - указатели теряются на x64.
-    # NotifyIcon - shell32; окно, меню, курсор, загрузка иконки - user32.
-    shell32.Shell_NotifyIconW.restype = ctypes.c_bool
-    shell32.Shell_NotifyIconW.argtypes = [ctypes.c_uint,
-                                          ctypes.POINTER(NOTIFYICONDATAW)]
-
-    user32.RegisterWindowMessageW.restype = ctypes.c_uint
-    user32.RegisterWindowMessageW.argtypes = [ctypes.c_wchar_p]
-    user32.RegisterClassExW.restype = ctypes.c_uint
-    user32.RegisterClassExW.argtypes = [ctypes.POINTER(WNDCLASSEXW)]
-    user32.CreateWindowExW.restype = VP
-    user32.CreateWindowExW.argtypes = [ctypes.c_uint, ctypes.c_wchar_p,
-                                       ctypes.c_wchar_p, ctypes.c_uint,
-                                       ctypes.c_int, ctypes.c_int, ctypes.c_int,
-                                       ctypes.c_int, VP, VP, VP, VP]
-    user32.DefWindowProcW.restype = LRESULT
-    user32.DefWindowProcW.argtypes = [VP, ctypes.c_uint, VP, VP]
-    user32.GetMessageW.restype = ctypes.c_int
-    user32.GetMessageW.argtypes = [ctypes.POINTER(MSG), VP, ctypes.c_uint,
-                                   ctypes.c_uint]
-    user32.TranslateMessage.argtypes = [ctypes.POINTER(MSG), VP, ctypes.c_uint,
-                                        VP]
-    user32.DispatchMessageW.argtypes = [ctypes.POINTER(MSG)]
-    user32.PostMessageW.restype = ctypes.c_bool
-    user32.PostMessageW.argtypes = [VP, ctypes.c_uint, VP, VP]
-    user32.PostQuitMessage.argtypes = [ctypes.c_int]
-    user32.SetForegroundWindow.restype = ctypes.c_bool
-    user32.SetForegroundWindow.argtypes = [VP]
-    user32.LoadCursorW.restype = VP
-    user32.LoadCursorW.argtypes = [VP, VP]
-    user32.GetCursorPos.restype = ctypes.c_bool
-    user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
-    user32.CreatePopupMenu.restype = VP
-    user32.CreatePopupMenu.argtypes = []
-    user32.AppendMenuW.restype = ctypes.c_bool
-    user32.AppendMenuW.argtypes = [VP, ctypes.c_uint, VP, ctypes.c_wchar_p]
-    user32.DestroyMenu.restype = ctypes.c_bool
-    user32.DestroyMenu.argtypes = [VP]
-    user32.TrackPopupMenuEx.restype = ctypes.c_int
-    user32.TrackPopupMenuEx.argtypes = [VP, ctypes.c_uint, ctypes.c_int,
-                                        ctypes.c_int, VP, VP]
-    user32.MessageBoxW.restype = ctypes.c_int
-    user32.MessageBoxW.argtypes = [VP, ctypes.c_wchar_p, ctypes.c_wchar_p,
-                                   ctypes.c_uint]
-
-    kernel32.GetModuleHandleW.restype = VP
-    kernel32.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
-    kernel32.GetCurrentProcessId.restype = ctypes.c_uint
-    kernel32.GetCurrentProcessId.argtypes = []
-    kernel32.GetLastError.restype = ctypes.c_uint
-    kernel32.GetLastError.argtypes = []
-    kernel32.CreateMutexW.restype = VP
-    kernel32.CreateMutexW.argtypes = [VP, ctypes.c_bool, ctypes.c_wchar_p]
-
-    # IsWindow фильтрует мёртвые/чужие hwnd из настроек: PostMessage на
-    # несуществующее окно вернул бы True и мы «показали» бы не то окно.
-    user32.IsWindow.restype = ctypes.c_bool
-    user32.IsWindow.argtypes = [VP]
-
-    # Системный значок по состоянию: LoadIconW(NULL, ordinal) - единственный
-    # путь, который здесь вышел (проверено пробом). Handle принадлежит системе:
-    # его не DestroyIcon, и одно и то же значение возвращается повторным
-    # вызовам, поэтому перерисовка иконки не копит ресурсы.
-    user32.LoadIconW.restype = VP
-    user32.LoadIconW.argtypes = [VP, VP]
-
-    def _make_hicon(name: str) -> int | None:
-        """HICON системного значка; неизвестное состояние -> значок «выключен»."""
-        icon = user32.LoadIconW(None, ICON_RESOURCES.get(name, ICON_RESOURCES["off"]))
-        return icon or None
+        Системный handle повторным LoadIconW возвращается тем же значением и
+        DestroyIcon не требует; handle от .NET не DestroyIcon - им владеет Icon.
+        """
+        dotnet = _dotnet_hicon(name)
+        if dotnet:
+            return dotnet
+        icon = user32.LoadIconW(
+            None, ICON_RESOURCES.get(name, ICON_RESOURCES["off"]))
+        return (icon or None), None
 
 
 class Tray:
@@ -461,14 +414,19 @@ class Tray:
     """
 
     def __init__(self, spec: Callable[["TraySpec"]],
-                 on_action: Callable[[str], None], uid: int = 1) -> None:
+                 on_action: Callable[[str], None], uid: int = 1,
+                 log: Callable[[str], None] | None = None) -> None:
         self._spec = spec
         self._on_action = on_action
         self._uid = uid
+        self._log = log or (lambda _text: None)
         self._thread: threading.Thread | None = None
         self._hwnd: int | None = None
         self._icon: int | None = None
+        self._icon_keep: object | None = None   # .NET Icon, если он дал handle
+        self._icon_kind = ""                     # "метка" | "системный значок"
         self._mutex: int | None = None
+        self._menu: "tray_menu.MenuHost | None" = None
         self._error = ""
         self._pending_info: tuple[str, str] | None = None
         self._ready = threading.Event()
@@ -481,6 +439,11 @@ class Tray:
     @property
     def hwnd(self) -> int | None:
         return self._hwnd
+
+    @property
+    def icon_kind(self) -> str:
+        """Откуда значок трея: наша метка (.NET) или системный fallback."""
+        return self._icon_kind
 
     def available(self) -> bool:
         return sys.platform == "win32"
@@ -594,13 +557,22 @@ class Tray:
         self._ready.set()
 
     def _icon_data(self, flags: int) -> NOTIFYICONDATAW:
+        """NOTIFYICONDATAW в классическом протоколе (uVersion=0).
+
+        Версия 4 сообщает события как NIN_SELECT и даёт курсор в client-
+        координатах; версия 0 присылает обычные mouse-сообщения, которые мы
+        и разбираем. uTimeout - длительность balloon (в версии 4 её несёт
+        dwInfoTimeout, заполняем оба).
+        """
         data = NOTIFYICONDATAW(ctypes.sizeof(NOTIFYICONDATAW), self._hwnd,
-                               self._uid, flags, WM_TRAY, self._icon, 0, 4)
+                               self._uid, flags, WM_TRAY, self._icon,
+                               4000, 0)
         return data
 
     def _add_icon(self) -> None:
         spec = self._spec()
-        self._icon = _make_hicon(spec.icon_state)
+        self._icon, self._icon_keep = _make_hicon(spec.icon_state)
+        self._icon_kind = "метка" if self._icon_keep else "системный значок"
         data = self._icon_data(NIF_MESSAGE | NIF_ICON | NIF_TIP)
         data.szTip = spec.tooltip[:TIP_LIMIT]
         if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(data)):
@@ -609,7 +581,7 @@ class Tray:
 
     def _refresh_icon(self, info: tuple[str, str] | None = None) -> None:
         spec = self._spec()
-        icon = _make_hicon(spec.icon_state)
+        icon, keep = _make_hicon(spec.icon_state)
         data = self._icon_data(NIF_ICON | NIF_TIP)
         data.hIcon = icon
         data.szTip = spec.tooltip[:TIP_LIMIT]
@@ -620,18 +592,24 @@ class Tray:
             data.szInfoTitle = info[0][:63]
             data.szInfo = info[1][:255]
         if shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(data)):
-            # значок системный: старый handle DestroyIcon не вызывает - это
-            # ресурс, которым владеет Windows (он же возвращается повторно)
+            # handle либо системный (повторный LoadIconW даёт то же значение),
+            # либо принадлежит .NET Icon - DestroyIcon не вызываем ни в одном
+            # случае; keepalive держит Icon живым
             if icon:
                 self._icon = icon
+                self._icon_keep = keep
+                self._icon_kind = "метка" if keep else "системный значок"
             self._pending_info = None
 
     def _remove_icon(self) -> None:
         if self._hwnd:
             data = self._icon_data(0)
             shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(data))
-        # hIcon принадлежит системе: снимаем только NotifyIcon
+        # hIcon не DestroyIcon: он системный или принадлежит .NET Icon (кэш)
         self._icon = None
+        self._icon_keep = None
+        if self._menu is not None:
+            self._menu.close_all()      # окна меню живут в этой нити
         self._forget_target()
 
     def _forget_target(self) -> None:
@@ -644,6 +622,8 @@ class Tray:
 
     def _on_message(self, hwnd, message, wparam, lparam) -> int:
         if message == WM_QUIT_TRAY:
+            if self._menu is not None:
+                self._menu.close_all()   # меню закрывается до конца цикла
             user32.PostQuitMessage(0)
             return 0
         if message == WM_UPDATE:
@@ -657,15 +637,32 @@ class Tray:
             return 0
         if message == WM_TRAY:
             event = int(lparam or 0)
-            if event in (WM_LBUTTONUP, WM_LBUTTONDBLCLK, NIN_BALLOONUSERCLICK):
+            if event in (WM_LBUTTONUP, WM_LBUTTONDBLCLK, NIN_SELECT,
+                         NIN_KEYSELECT, NIN_BALLOONUSERCLICK):
                 self._on_action(SHOW)
-            elif event in (WM_RBUTTONUP, WM_CONTEXTMENU):
-                self._popup_menu(hwnd)
+            elif event in (WM_RBUTTONUP, WM_RBUTTONDBLCLK, WM_CONTEXTMENU):
+                self._open_menu(hwnd)
+            # WM_RBUTTONDOWN и служебные коды balloon (show/hide/timeout) -
+            # не действия: нажатие не должно открывать меню до релиза
             return 0
         return user32.DefWindowProcW(hwnd, message, wparam, lparam)
 
-    def _popup_menu(self, hwnd) -> None:
-        """Меню строится заново на каждый клик: состояние всегда актуально."""
+    def _open_menu(self, hwnd) -> None:
+        """Тёмное меню своим popup-окном; если клей не поднялся - нативное.
+
+        Меню НЕ блокирует нить: окно живёт на сообщениях, поэтому иконка
+        обновляется, пока меню открыто. Нативный TrackPopupMenuEx - резервный
+        путь (нет десктопа/GDI), и он блокирует нить до закрытия меню.
+        """
+        spec = self._spec()
+        if self._menu is None:
+            self._menu = tray_menu.MenuHost(self._log)
+        if self._menu.open(spec, self._on_action):
+            return
+        self._popup_menu_native(hwnd)
+
+    def _popup_menu_native(self, hwnd) -> None:
+        """Резерв: меню строится заново на каждый клик - состояние актуально."""
         spec = self._spec()
         menu = user32.CreatePopupMenu()
         commands: dict[int, str] = {}
