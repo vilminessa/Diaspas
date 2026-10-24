@@ -183,6 +183,10 @@ restype'ить (`VP = c_void_p`, `LRESULT = c_ssize_t`), иначе ctypes ве�
 `assets/icon.svg` и `assets/icon.ico` (`tools/render_icon.py`, сверка
 `--check`, актуальность держит `tests/test_icons.py` - тот же принцип, что
 `build_ui.py --check`). Растер считается из `ink_at` напрямую, Pillow не нужен.
+SVG сверяется с нормализацией переводов строк (`render_icon.as_lf`): раннер CI
+на Windows с `autocrlf` кладёт в рабочую копию CRLF, и сравнение по байтам
+давало «расхождение» при актуальном содержимом - для текста единица сравнения
+его содержимое, а ICO остаётся бинарным и сравнивается по байтам.
 `assets/icon.ico` вшит в exe (`diaspas.spec: icon=`) - значок файла и панели
 задач; окно формы получает его через pythonnet (`native.Icon =
 Icon(FileStream(...))` в `App.hello` - к этому моменту `win.native` уже

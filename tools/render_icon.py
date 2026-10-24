@@ -36,6 +36,17 @@ def render_ico() -> bytes:
     return icons.ico_bytes(sizes=(16, 32, 48, 64), rgb=ASSET_INK)
 
 
+def as_lf(data: bytes) -> bytes:
+    """Текст ассета в LF: git с autocrlf отдаёт рабочую копию с CRLF.
+
+    SVG - текст, и единица сравнения его содержимое, а не переводы строк:
+    без нормализации сверка падала в CI на Windows-runner (тот же урок, что
+    `build_ui.digests`). ICO - бинарный файл, git его не переписывает, поэтому
+    он сравнивается по байтам как есть.
+    """
+    return data.replace(b"\r\n", b"\n")
+
+
 def write_assets() -> list[tuple[Path, int]]:
     SVG_PATH.parent.mkdir(exist_ok=True)
     out = []
@@ -48,15 +59,17 @@ def write_assets() -> list[tuple[Path, int]]:
 def check_assets() -> int:
     """Сверка ассетов с генерацией; 1 - файлы устарели (или их нет)."""
     rc = 0
-    for path, data in ((SVG_PATH, render_svg()), (ICO_PATH, render_ico())):
+    for path, data, text in ((SVG_PATH, render_svg(), True),
+                             (ICO_PATH, render_ico(), False)):
         if not path.is_file():
             print(f"FAIL {path}: нет файла (сгенерируй tools/render_icon.py)")
             rc = 1
             continue
         current = path.read_bytes()
-        if current != data:
+        expected = as_lf(data) if text else data
+        if as_lf(current) != expected:
             print(f"FAIL {path}: расходится с core.icons "
-                  f"({len(current)} байт против {len(data)}) - "
+                  f"({len(current)} байт против {len(expected)}) - "
                   f"выполни tools/render_icon.py")
             rc = 1
     if rc == 0:

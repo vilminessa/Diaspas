@@ -154,9 +154,38 @@ def test_assets_match_generation():
     import render_icon
 
     assert SVG_PATH.is_file() and ICO_PATH.is_file()
-    assert SVG_PATH.read_bytes() == render_icon.render_svg()
+    # SVG - текст: в рабочей копии git с autocrlf даёт CRLF, поэтому сверяем
+    # содержимое, а не байты с \r\n (CI на Windows-runner падал на байтах)
+    assert render_icon.as_lf(SVG_PATH.read_bytes()) == render_icon.render_svg()
     assert ICO_PATH.read_bytes() == render_icon.render_ico()
     assert render_icon.check_assets() == 0
+
+
+def test_svg_check_tolerates_crlf_checkout(tmp_path, monkeypatch):
+    """Рабочая копия с CRLF (autocrlf на Windows-runner) - сверка не падает.
+
+    Регрессия CI: ассеты сравнивались по байтам, и checkout с CRLF давал
+    «расхождение» при актуальном содержимом. Отказ по содержимому при этом
+    остаётся: правка метки и порча ICO всё ещё дают FAIL.
+    """
+    sys.path.insert(0, str(REPO / "tools"))
+    import render_icon
+
+    svg = tmp_path / "icon.svg"
+    ico = tmp_path / "icon.ico"
+    svg.write_bytes(render_icon.render_svg().replace(b"\n", b"\r\n"))
+    ico.write_bytes(render_icon.render_ico())
+    monkeypatch.setattr(render_icon, "SVG_PATH", svg)
+    monkeypatch.setattr(render_icon, "ICO_PATH", ico)
+
+    assert render_icon.check_assets() == 0
+    assert svg.read_bytes().count(b"\r\n") > 0          # именно CRLF-копия
+
+    svg.write_bytes(render_icon.render_svg().replace(b"<circle", b"<circleX"))
+    assert render_icon.check_assets() == 1              # форма изменилась
+    svg.write_bytes(render_icon.render_svg())
+    ico.write_bytes(render_icon.render_ico()[:100])     # бинарный ассет по байтам
+    assert render_icon.check_assets() == 1
 
 
 def test_icon_names_cover_every_tray_state():
