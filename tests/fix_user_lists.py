@@ -5,24 +5,27 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core import presets as pm, probes, service  # noqa: E402
-
-ROOT = Path.home() / ("AppData/Local/Diaspas/zapret/"
-                      "zapret-discord-youtube-1.10.3")
+from core import paths, presets as pm, probes, service  # noqa: E402
 
 
 def main() -> int:
+    root = paths.zapret_dir_from_settings()
+    if root is None:
+        print("папка zapret не найдена - укажите её в GUI или в settings.json")
+        return 1
+    print(f"папка: {root}")
+
     print("=== пользовательские списки ===")
-    pm.ensure_user_lists(ROOT)
+    pm.ensure_user_lists(root)
     for name in ("ipset-exclude-user.txt", "list-general-user.txt",
                  "list-exclude-user.txt"):
-        p = ROOT / "lists" / name
+        p = root / "lists" / name
         state = f"{p.stat().st_size} байт" if p.is_file() else "НЕТ"
         print(f"  {name}: {state}")
 
     print("=== применение пресета apex_ea ===")
     apex = next(p for p in pm.load_presets() if p.key == "apex_ea")
-    res = pm.apply(apex, ROOT, log=lambda lvl, msg: print(f"  [{lvl}] {msg}"))
+    res = pm.apply(apex, root, log=lambda lvl, msg: print(f"  [{lvl}] {msg}"))
     print("apply ok =", res.get("ok"), res.get("error", ""))
     if not res.get("ok"):
         return 1

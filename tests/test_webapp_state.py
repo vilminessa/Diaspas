@@ -17,10 +17,21 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core import paths, presets as presets_mod, release, service  # noqa: E402
+from core import autoswitch, paths, presets as presets_mod, release, service, strategies as strategies_mod  # noqa: E402
 from ui.webapp import App  # noqa: E402
 
 DIR = Path("C:/zapret/zapret-discord-youtube-1.10.3")
+
+
+def make_zapret_root(tmp_path: Path, names=("general (ALT11).bat",
+                                            "general (ALT7).bat")) -> Path:
+    """Папка установки со стратегиями: список и сопоставление метки реестра."""
+    root = tmp_path / "zapret"
+    root.mkdir(exist_ok=True)
+    for name in names:
+        (root / name).write_text('start /min "%BIN%winws.exe" --wf-tcp=80\r\n',
+                                 encoding="utf-8")
+    return root
 
 
 def make_app(tmp_path, monkeypatch, installed=True, root=DIR):
@@ -122,6 +133,136 @@ def test_install_release_no_offer_when_service_exists(tmp_path, monkeypatch):
     assert res["ok"] is True
     assert res["needs_preset"] is False
     assert "active_preset" not in res
+
+
+# -- смена стратегии -------------------------------------------------------
+
+def test_state_reports_strategy_controls(tmp_path, monkeypatch):
+    """state отдаёт список стратегий, effective-метку и режим."""
+    app, _ = make_app(tmp_path, monkeypatch, installed=True)
+    app.zapret_root = make_zapret_root(tmp_path)
+    st = app.state()
+    assert st["strategy_file"] == "general (ALT11).bat"
+    assert st["strategy_label"] == "ALT11"
+    assert st["strategy_mode"] == "manual"
+    assert st["auto_cooldown_left"] == 0
+    assert any(s["active"] for s in st["strategies"])
+    assert {s["file"] for s in st["strategies"]} == {
+        "general (ALT11).bat", "general (ALT7).bat"}
+
+
+def test_presets_report_effective_strategy(tmp_path, monkeypatch):
+    """Выбранная вручную стратегия показывается в пресетах, default - рядом."""
+    app, _ = make_app(tmp_path, monkeypatch)
+    app.zapret_root = make_zapret_root(tmp_path)
+    strategies_mod.remember("general (ALT7).bat")
+    items = app.presets()
+    base = next(p for p in items if p["key"] == "discord_youtube")
+    assert base["strategy"] == "general (ALT7).bat"
+    assert base["default_strategy"] == "general (ALT11).bat"
+    assert next(p for p in items if p["key"] == "off")["strategy"] == ""
+
+
+def test_apply_strategy_delegates_and_emits_state(tmp_path, monkeypatch):
+    app, _ = make_app(tmp_path, monkeypatch)
+    app.zapret_root = make_zapret_root(tmp_path)
+    seen: dict = {}
+
+    def fake_apply(root, file, **kwargs):
+        seen.update({"root": root, "file": file})
+        return {"ok": True, "strategy": file, "label": "ALT7"}
+
+    monkeypatch.setattr(strategies_mod, "apply", fake_apply)
+    events: list = []
+    monkeypatch.setattr(app.emitter, "emit",
+                        lambda kind, payload=None: events.append(kind))
+    res = app.apply_strategy("general (ALT7).bat")
+    assert res["ok"] is True
+    assert seen["file"] == "general (ALT7).bat"
+    assert "state" in events
+
+
+def test_apply_strategy_without_dir(tmp_path, monkeypatch):
+    app, _ = make_app(tmp_path, monkeypatch, installed=False, root=None)
+    assert app.apply_strategy("general (ALT7).bat")["ok"] is False
+
+
+def test_set_strategy_mode_persists(tmp_path, monkeypatch):
+    app, _ = make_app(tmp_path, monkeypatch)
+    assert app.set_strategy_mode("auto")["ok"] is True
+    assert app.state()["strategy_mode"] == "auto"
+    assert app.set_strategy_mode("weird")["ok"] is False
+    assert app.state()["strategy_mode"] == "auto"
+    assert app.set_strategy_mode("manual")["ok"] is True
+
+
+def test_auto_run_delegates_and_emits(tmp_path, monkeypatch):
+    app, _ = make_app(tmp_path, monkeypatch)
+    app.zapret_root = make_zapret_root(tmp_path)
+    seen: dict = {}
+
+    def fake_run(root, report=None, force=False, log=None,
+                 on_progress=None, wait=900.0):
+        seen["force"] = force
+        if on_progress:
+            on_progress({"done": 1, "total": 2, "best": "general (ALT12).bat",
+                         "results": []})
+        return {"ok": True, "ran": True, "applied": True,
+                "best": "general (ALT12).bat", "label": "ALT12",
+                "reason": "applied",
+                "probes": {"state": "full", "count": 11, "total": 11,
+                           "groups": {}},
+                "results": [{"name": "general (ALT12).bat", "state": "full",
+                             "count": 11, "total": 11, "targets": []}]}
+
+    monkeypatch.setattr(autoswitch, "run", fake_run)
+    events: list = []
+    monkeypatch.setattr(app.emitter, "emit",
+                        lambda kind, payload=None: events.append((kind, payload)))
+
+    res = app.auto_run(force=True)
+    assert res["applied"] is True
+    assert seen["force"] is True
+    kinds = [kind for kind, _ in events]
+    assert "probes" in kinds and "state" in kinds
+    progress = next(p for kind, p in events if kind == "select_progress")
+    assert progress["auto"] is True
+    assert app.last_probes is not None
+
+
+def test_auto_run_reentrant_guard(tmp_path, monkeypatch):
+    app, _ = make_app(tmp_path, monkeypatch)
+    app._auto_running = True
+    assert app.auto_run()["ok"] is False
+
+
+def test_version_reports_build_label(tmp_path, monkeypatch):
+    """Статус-бар различает unreleased, бету и релиз - по одному источнику."""
+    import version as app_version
+
+    app, _ = make_app(tmp_path, monkeypatch)
+    base = app.version()
+    assert base["version"] == app_version.__version__
+    assert base["label"] == "unreleased"
+    assert base["beta"] is False and base["built_from_tag"] is False
+
+    monkeypatch.setattr(app_version, "BUILD_LABEL", "b0.1.2")
+    beta = app.version()
+    assert beta["label"] == "b0.1.2"
+    assert beta["beta"] is True and beta["built_from_tag"] is True
+
+    monkeypatch.setattr(app_version, "BUILD_LABEL", "v0.1.2")
+    stable = app.version()
+    assert stable["label"] == "v0.1.2" and stable["beta"] is False
+
+
+def test_hello_carries_build_label(tmp_path, monkeypatch):
+    """Инициализация моста отдаёт подпись сборки - фронт не ждёт отдельного вызова."""
+    import version as app_version
+
+    app, _ = make_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(app_version, "BUILD_LABEL", "v0.1.2")
+    assert app.hello()["label"] == "v0.1.2"
 
 
 def test_index_has_create_service_button():

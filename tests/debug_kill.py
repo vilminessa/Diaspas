@@ -1,12 +1,22 @@
-"""Почему proc.kill() не закрывает Diaspas.exe?"""
+"""Почему proc.kill() не закрывает Diaspas.exe?
+
+Ad-hoc диагностика процесса PyInstaller (onefile = bootstrap + приложение).
+Путь по умолчанию - ``<репозиторий>/dist/Diaspas.exe``.
+"""
 import subprocess
 import sys
 import time
+from pathlib import Path
 
-EXE = r"B:\projs\Diaspas\dist\Diaspas.exe"
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_EXE = ROOT / "dist" / "Diaspas.exe"
 
 if __name__ == "__main__":
-    proc = subprocess.Popen([EXE])
+    exe = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_EXE
+    if not exe.is_file():
+        print(f"нет {exe} - сначала соберите: pyinstaller diaspas.spec")
+        raise SystemExit(1)
+    proc = subprocess.Popen([str(exe)])
     pid = proc.pid
     print(f"запущен PID {pid}")
     time.sleep(6)

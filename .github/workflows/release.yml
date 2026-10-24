@@ -42,7 +42,11 @@ jobs:
       - name: Юнит-тесты (pytest)
         run: python -m pytest tests/ -q
       - name: Линт (pyflakes)
-        run: python -m pyflakes core ui tools i18n.py main.py
+        run: python -m pyflakes core ui tools i18n.py main.py version.py
+      - name: Линт workflows (.github/workflows)
+        # конвейер проверяет сам себя: гарды полос, пининг uses, наличие
+        # шага проставления версии перед сборкой
+        run: python tools/check_workflows.py
       - name: Формат тега (v1.0.0)
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
@@ -81,6 +85,14 @@ jobs:
           cache: pip
       - name: Зависимости
         run: python -m pip install -r requirements.txt
+      - name: Версия из тега (stamp_version)
+        # Вписывает __version__ и BUILD_LABEL в рабочее дерево до сборки:
+        # VersionInfo exe и подпись интерфейса уезжают в бандл с теговой
+        # версией. В git ничего не попадает (дерево CI одноразовое), на
+        # dispatch (ветка без тега) версия остаётся unreleased.
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: python tools/stamp_version.py "$GITHUB_REF_NAME"
       - name: Сборка exe
         run: python -m PyInstaller diaspas.spec --distpath . --workpath build --noconfirm
       - name: Проверка артефакта

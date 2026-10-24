@@ -34,6 +34,10 @@ const S = {
   busy: false,
   logs: [],          // строки журнала (объекты {ts, level, text})
   logFilter: "all",
+  version: null,     // {version, label, beta} - подпись сборки в статус-баре
+  autoRunning: false,   // один автоцикл за раз (на фронте и в Python)
+  autoStarted: false,   // авто при старте не повторяем после первой проверки
+  lastSelect: null,     // итог ручного перебора — для «Применить лучшую»
 };
 
 /* ── мелкие утилиты ─────────────────────────────────────────── */
@@ -68,6 +72,8 @@ function setBusy(busy, label) {
   // блокировка действий: пока занято, кнопки не дёргают
   document.querySelectorAll(".tab, #preset-grid button, .card .btn, .card select")
     .forEach((b) => { b.disabled = busy; });
+  $("#auto-strategy").disabled = busy;
+  syncStrategyControls();
 }
 
 /* ── вкладки ─────────────────────────────────────────────────── */
@@ -112,11 +118,14 @@ function renderState(st) {
 
   $("#v-service").textContent = st.installed
     ? (run ? "работает" : "остановлена") : "не установлена";
-  $("#v-strategy").textContent = st.strategy || "—";
+  $("#v-strategy").textContent = (st.strategy_label || st.strategy || "—")
+    + (st.strategy_mode === "auto" ? " · авто" : "");
   $("#v-preset").textContent = st.preset_title || "не распознан";
   $("#v-pid").textContent = st.pid ? String(st.pid) : "—";
   $("#zapret-path").textContent = st.zapret_dir || "папка не найдена";
   $("#zapret-path").title = st.zapret_dir || "";
+
+  renderStrategy(st);
 
   // кнопка «Создать службу»: папка есть, а службы нет
   const need = st.dir_ok && !st.installed;
@@ -137,6 +146,150 @@ function renderState(st) {
   });
 
   if (st.release_note) $("#release-note").textContent = st.release_note;
+}
+
+/* ── смена стратегии ────────────────────────────────────────── */
+const AUTO_REASON = {
+  off: "режим выключен",
+  full: "всё отвечает — менять нечего",
+  cooldown: "подбор был недавно — пауза",
+  preset_off: "пресет «Выкл»: обход выключен намеренно",
+  none: "полной стратегии не найдено — оставляю текущую",
+  already: "лучшая стратегия уже активна",
+};
+
+function fmtMinutes(sec) {
+  const m = Math.max(1, Math.round(sec / 60));
+  return m >= 60 ? `${Math.round(m / 60)} ч` : `${m} мин`;
+}
+
+function agoText(epoch) {
+  const min = Math.max(0, Math.round((Date.now() / 1000 - epoch) / 60));
+  if (min < 1) return "только что";
+  if (min < 60) return `${min} мин назад`;
+  const hours = Math.round(min / 60);
+  return hours < 48 ? `${hours} ч назад` : `${Math.round(hours / 24)} дн назад`;
+}
+
+function renderStrategy(st) {
+  const sel = $("#strategy-select");
+  const list = st.strategies || [];
+  sel.innerHTML = list.length
+    ? list.map((s) => `<option value="${escapeHtml(s.file)}">` +
+                      `${escapeHtml(s.label)}</option>`).join("")
+    : `<option value="">нет стратегий</option>`;
+  const active = list.find((s) => s.active);
+  sel.value = active ? active.file : (st.strategy_file || "");
+
+  $("#auto-strategy").checked = st.strategy_mode === "auto";
+  syncStrategyControls();
+
+  const note = [];
+  if (st.strategy_mode === "auto") {
+    note.push("авто: подбор при запуске и после проб с сбоями");
+    if (st.auto_cooldown_left > 0) {
+      note.push(`следующий подбор через ${fmtMinutes(st.auto_cooldown_left)}`);
+    }
+  } else {
+    note.push("выбор вручную: стратегия сохраняется при смене пресета");
+  }
+  if (st.auto_last_strategy) {
+    note.push(`авто применяло ${labelOf(st.auto_last_strategy)}` +
+              (st.auto_last_at ? ` · ${agoText(st.auto_last_at)}` : ""));
+  }
+  $("#strategy-note").textContent = note.join(" · ");
+}
+
+/** Доступность контролов стратегии: занято / авто-режим / нет папки. */
+function syncStrategyControls() {
+  const busy = S.busy;
+  const auto = !!S.state && S.state.strategy_mode === "auto";
+  const noDir = !S.state || !S.state.dir_ok;
+  const sel = $("#strategy-select");
+  const btn = $("#btn-apply-strategy");
+  const box = $("#auto-strategy");
+  sel.disabled = busy || auto || noDir;
+  btn.disabled = busy || auto || noDir;
+  box.disabled = busy || noDir;
+  box.closest(".check").classList.toggle("off", box.disabled);
+}
+
+async function applyStrategy(file) {
+  if (S.busy) return;
+  const target = file || $("#strategy-select").value;
+  if (!target) {
+    toast("Стратегия не выбрана", "err");
+    return;
+  }
+  const label = labelOf(target);
+  const ok = await confirmBox("Сменить стратегию",
+    `Служба zapret будет пересоздана со стратегией «${label}».\n` +
+    `Game Filter, IPSet и списки доменов останутся как сейчас.\n` +
+    `Discord и YouTube могут кратковременно прерываться.\n\nПродолжить?`);
+  if (!ok) return;
+
+  setBusy(true, `ставлю стратегию ${label}…`);
+  try {
+    const res = await api().apply_strategy(target);
+    if (res && res.ok) toast(`Стратегия: ${label}`, "ok");
+    else toast("Ошибка: " + ((res && res.error) || "неизвестно"), "err");
+  } catch (e) {
+    toast("Ошибка: " + e, "err");
+  } finally {
+    setBusy(false, "готов");
+    await refreshState();
+  }
+}
+
+async function toggleAutoMode() {
+  const box = $("#auto-strategy");
+  const want = box.checked ? "auto" : "manual";
+  if (want === "auto") {
+    const ok = await confirmBox("Автоподбор стратегий",
+      "Diaspas будет проверять доступность сервисов при запуске и после проб\n" +
+      "с сбоями, перебирать стратегии и сам применит лучшую. Служба будет\n" +
+      "пересоздаваться. Подбор — не чаще одного раза в 30 минут.\n\nВключить?");
+    if (!ok) {
+      box.checked = false;
+      return;
+    }
+  }
+  try {
+    const res = await api().set_strategy_mode(want);
+    if (!res || !res.ok) {
+      toast("Ошибка: " + ((res && res.error) || "неизвестно"), "err");
+    }
+  } catch (e) {
+    toast("Ошибка: " + e, "err");
+  }
+  await refreshState();
+}
+
+async function runAuto(label = "автоподбор стратегии…") {
+  if (S.busy || S.autoRunning) return null;
+  S.autoRunning = true;
+  setBusy(true, label);
+  try {
+    const res = await api().auto_run();
+    if (res && res.probes) renderProbes(res.probes);
+    if (res && res.results && res.results.length) {
+      $("#select-table tbody").innerHTML = res.results.map(rowHtml).join("");
+    }
+    if (!res || !res.ok) {
+      toast("Авто: " + ((res && res.error) || "не удалось запустить"), "err");
+    } else if (res.applied) {
+      toast(`Авто: применена ${res.label || labelOf(res.best)}`, "ok");
+    } else {
+      toast("Авто: " + (AUTO_REASON[res.reason] || res.reason || "без изменений"), "");
+    }
+    return res;
+  } catch (e) {
+    toast("Ошибка автоподбора: " + e, "err");
+  } finally {
+    S.autoRunning = false;
+    setBusy(false, "готов");
+    await refreshState();
+  }
 }
 
 async function createService(key) {
@@ -183,7 +336,8 @@ async function applyPreset(p) {
     ? "Служба zapret будет удалена, winws остановлен."
     : `Стратегия: ${p.strategy}${p.game_filter ? `, Game Filter: ${p.game_filter}` : ""}` +
       `${p.ipset ? `, IPSet: ${p.ipset}` : ""}` +
-      `${p.exclude_domains && p.exclude_domains.length ? ", исключения: " + p.exclude_domains.join(", ") : ""}`;
+      `${p.exclude_domains && p.exclude_domains.length ? ", исключения: " + p.exclude_domains.join(", ") : ""}` +
+      `${p.exclude_ips && p.exclude_ips.length ? ", IP-исключения: " + p.exclude_ips.join(", ") : ""}`;
   const ok = await confirmBox(`Пресет «${p.title}»`, what + "\n\nПродолжить?");
   if (!ok) return;
 
@@ -243,8 +397,9 @@ function renderProbes(report) {
 async function runProbes() {
   if (S.busy) return;
   setBusy(true, "проверяю целевые сервисы…");
+  let report = null;
   try {
-    const report = await api().probes_run();
+    report = await api().probes_run();
     renderProbes(report);
     $("#statusbar-text").textContent =
       `пробы: ${report.count}/${report.total}`;
@@ -252,6 +407,11 @@ async function runProbes() {
     toast("Ошибка проб: " + e, "err");
   } finally {
     setBusy(false, "готов");
+  }
+  // В авто-режиме сбой проб - триггер: подбор и применение лучшей стратегии.
+  if (report && S.state && S.state.strategy_mode === "auto"
+      && report.state !== "full" && report.total > 0) {
+    await runAuto("авто: подбираю стратегию после сбоя…");
   }
 }
 
@@ -305,11 +465,14 @@ async function runAb() {
 /* ── автоподбор ──────────────────────────────────────────────── */
 function renderSelectProgress(p) {
   const total = p.total || 0, done = p.done || 0;
-  $("#select-progress").textContent = `${done}/${total}` +
-    (p.best ? ` · лучшая ${p.best}` : "");
+  const kind = p.auto ? "авто" : "перебор";
+  const text = `${kind} ${done}/${total}` +
+    (p.best ? ` · лучшая ${labelOf(p.best)}` : "");
+  $("#select-progress").textContent = text;
   $("#select-bar").style.width = total ? `${done * 100 / total}%` : "0%";
   const rows = (p.results || []).map(rowHtml).join("");
   if (rows) $("#select-table tbody").innerHTML = rows;
+  if (S.busy) $("#statusbar-text").textContent = text;
 }
 
 function rowHtml(r) {
@@ -320,7 +483,7 @@ function rowHtml(r) {
     else if (targets[t.group] === undefined) targets[t.group] = true;
   });
   const stateCls = r.state === "full" ? "ok" : (r.state === "partial" ? "warn" : "err");
-  return `<tr>
+  return `<tr class="${r.best ? "best-row" : ""}">
     <td class="mono">${escapeHtml((r.name || "").replace(/^general ?\(?|\)?\.bat$/g, ""))}</td>
     <td class="${stateCls}">${escapeHtml(r.state || "")}</td>
     <td class="mono">${r.count}/${r.total}</td>
@@ -330,7 +493,7 @@ function rowHtml(r) {
 
 async function runSelect() {
   if (S.busy) return;
-  const ok = await confirmBox("Автоподбор стратегий",
+  const ok = await confirmBox("Перебор стратегий",
     "Служба zapret будет пересоздаваться для каждой стратегии; Discord и YouTube " +
     "могут кратковременно прерываться. Продолжить?");
   if (!ok) return;
@@ -338,6 +501,10 @@ async function runSelect() {
   setBusy(true, "перебор стратегий…");
   $("#btn-select-cancel").disabled = false;
   $("#select-best").classList.add("hidden");
+  S.lastSelect = null;
+  const applyBtn = $("#btn-select-apply");
+  applyBtn.classList.add("hidden");
+  applyBtn.disabled = true;
   try {
     const res = await api().select_run();
     if (!res || !res.ok) {
@@ -348,8 +515,15 @@ async function runSelect() {
       $("#select-bar").style.width = "100%";
       const best = res.best ? labelOf(res.best) : "не подобрана";
       $("#select-best").classList.remove("hidden");
-      $("#select-best").textContent = `★ Рекомендуемая стратегия: ${best}`;
+      $("#select-best").textContent = `★ Рекомендуемая стратегия: ${best}` +
+        (res.early ? "" : ` (перебрано ${res.done || 0}/${res.total || 0})`);
       toast(`Лучшая стратегия: ${best}`, "ok");
+      // «Применить лучшую» - тот же путь, что ручной выбор в Обзоре:
+      // режимы (Game Filter, IPSet, списки) не меняются.
+      S.lastSelect = res;
+      applyBtn.dataset.file = res.best || "";
+      applyBtn.classList.toggle("hidden", !res.best);
+      applyBtn.disabled = !res.best;
     }
   } catch (e) {
     toast("Ошибка перебора: " + e, "err");
@@ -439,6 +613,23 @@ function escapeHtml(s) {
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+/** Подпись сборки в статус-баре: тег релиза/беты или «unreleased». */
+function renderVersion(v) {
+  S.version = v || null;
+  const el = $("#app-version");
+  if (!v) {
+    el.textContent = "";
+    el.classList.remove("beta");
+    return;
+  }
+  const label = v.label || "unreleased";
+  el.textContent = v.beta ? `${label} · бета` : label;
+  el.classList.toggle("beta", !!v.beta);
+  el.title = v.built_from_tag
+    ? `Собрано из тега ${label} (числовая версия ${v.version})`
+    : `Собрано не из тега: числовая версия ${v.version}`;
+}
+
 /* ── инициализация ───────────────────────────────────────────── */
 document.addEventListener("DOMContentLoaded", () => {
   // вкладки
@@ -456,6 +647,9 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#btn-ab").onclick = runAb;
   $("#btn-select").onclick = runSelect;
   $("#btn-select-cancel").onclick = () => api().select_cancel();
+  $("#btn-select-apply").onclick = () => applyStrategy($("#btn-select-apply").dataset.file);
+  $("#btn-apply-strategy").onclick = () => applyStrategy();
+  $("#auto-strategy").onchange = toggleAutoMode;
   $("#log-filter").onchange = (e) => { S.logFilter = e.target.value; renderLog(); };
   $("#btn-log-copy").onclick = async () => {
     const text = S.logs.map((l) => l.raw || l.text).join("\n");
@@ -485,12 +679,22 @@ async function init() {
   try {
     // доказательство живости моста: Python получит вызов и запишет в журнал
     await api().hello();
+    renderVersion(await api().version());
     // хвост журнала прошлого запуска + текущие строки
     const lines = await api().log_tail(400);
     (lines || []).forEach(appendLog);
     renderPresets(await api().presets());
     await refreshState();
     $("#statusbar-text").textContent = "готов";
+    // Авто-режим при старте: проверка доступности и, если есть сбои,
+    // подбор + применение лучшей стратегии. Один раз на сессию.
+    if (S.state && S.state.strategy_mode === "auto" && S.state.running
+        && !S.autoStarted) {
+      S.autoStarted = true;
+      setTimeout(() => {
+        runAuto("авто: проверяю доступность при запуске…");
+      }, 400);
+    }
   } catch (e) {
     toast("Ошибка инициализации: " + e, "err");
   }

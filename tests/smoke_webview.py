@@ -6,6 +6,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LOG = Path.home() / "AppData/Local/Diaspas/diaspas.log"
+sys.path.insert(0, str(ROOT / "tests"))
+from _console import decode  # noqa: E402 - вывод PowerShell в OEM-кодовке
 
 FIND_WINDOW = r'''
 Add-Type @"
@@ -46,8 +48,9 @@ def main() -> int:
     print("процесс жив")
 
     out = subprocess.run(["powershell", "-NoProfile", "-Command", FIND_WINDOW],
-                         capture_output=True, text=True, timeout=30)
-    print("окна:", out.stdout.strip() or out.stderr.strip())
+                         capture_output=True, timeout=30)
+    windows = decode(out.stdout).strip() or decode(out.stderr).strip()
+    print("окна:", windows)
 
     # журнал должен содержать следы: веб-запуск и живость моста
     after = LOG.read_text(encoding="utf-8-sig") if LOG.is_file() else ""
@@ -65,7 +68,7 @@ def main() -> int:
     time.sleep(1)
     print("закрыт, poll =", proc.poll())
 
-    ok = (out.stdout and "нет окон" not in out.stdout
+    ok = (windows and "нет окон" not in windows
           and len(bridge_lines) > 0 and not exc_lines)
     print("ИТОГ:", "OK" if ok else "ПРОВАЛ")
     return 0 if ok else 1

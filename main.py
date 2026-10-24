@@ -5,8 +5,13 @@ ui/bundle.py со встроенным HTML/CSS/JS. Если webview недос�
 WebView2, нет pywebview), откатываемся на Tkinter-окно ui/window.py -
 утилита должна открываться, а не падать.
 
-Запуск из исходников: ``python main.py``.
-Сборка: ``pyinstaller diaspas.spec``.
+Запуск из исходников:
+
+    python main.py           # webview
+    python main.py --debug   # webview с DevTools (консоль JS)
+    python main.py --tk      # Tkinter-резерв, без попытки webview
+
+Сборка: ``pyinstaller diaspas.spec``. Ручные прогоны - debug.bat.
 """
 
 from __future__ import annotations
@@ -19,17 +24,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 def main() -> int:
+    argv = sys.argv[1:]
+
     # 1. webview - основной путь: ui.webapp сам импортирует pywebview и
     #    ui.bundle, поэтому ImportError здесь = нет зависимости или бандла
-    try:
-        from ui.webapp import run
-        return run()
-    except ImportError as exc:
-        sys.stderr.write(f"webview недоступен ({exc}) - Tkinter-резерв\n")
-    except Exception:  # noqa: BLE001 - любая ошибка webview -> резерв
-        import traceback
-        traceback.print_exc()
-        sys.stderr.write("webview не запустился - Tkinter-резерв\n")
+    if "--tk" not in argv:
+        try:
+            from ui.webapp import run
+            return run()
+        except ImportError as exc:
+            sys.stderr.write(f"webview недоступен ({exc}) - Tkinter-резерв\n")
+        except Exception:  # noqa: BLE001 - любая ошибка webview -> резерв
+            import traceback
+            traceback.print_exc()
+            sys.stderr.write("webview не запустился - Tkinter-резерв\n")
 
     # 2. Tkinter - резервное окно (тот же core)
     from ui.window import App

@@ -18,14 +18,16 @@ from __future__ import annotations
 import json
 import os
 import queue
+import sys
 import threading
 import traceback
 from pathlib import Path
 
 import webview
 
-from core import abtest, autoselect, log as dlog, paths, presets as presets_mod
-from core import probes, release, service
+import version
+from core import abtest, autoselect, autoswitch, log as dlog, paths, presets as presets_mod
+from core import probes, release, service, strategies as strategies_mod
 from i18n import tr
 from ui.bundle import INDEX_HTML
 
@@ -76,6 +78,7 @@ class App:
         self.zapret_root: Path | None = paths.zapret_dir_from_settings()
         self.last_probes: dict | None = None
         self._select_running = False
+        self._auto_running = False
         # один warning о пропавшей службе на сессию - без спама в журнал
         self._warned_missing_service = False
 
@@ -94,13 +97,26 @@ class App:
         отвечает (типичная поломка после рефакторинга моста).
         """
         self.log("info", "фронтенд подключился: мост JS<->Python работает")
-        return {"ok": True, "app": "Diaspas", "ui": "webview"}
+        return {"ok": True, "app": "Diaspas", "ui": "webview",
+                "label": version.label()}
+
+    def version(self) -> dict:
+        """Версия сборки для статус-бара.
+
+        ``label`` - тег сборки (v0.1.2 / b0.1.2) или ``unreleased``, если exe
+        собран не из тега: по этой подписи в журнале видно, какая сборка
+        вела пробы и перебор стратегий.
+        """
+        return {"version": version.__version__, "label": version.label(),
+                "beta": version.is_beta(),
+                "built_from_tag": bool(version.BUILD_LABEL)}
 
     # -- состояние -----------------------------------------------------
 
     def state(self) -> dict:
         st = service.state(log=self.log)
         current = None
+        infos: list[strategies_mod.StrategyInfo] = []
         if self.zapret_root is not None:
             try:
                 current = presets_mod.current_preset(
@@ -109,6 +125,12 @@ class App:
             except Exception:  # noqa: BLE001 - распознавание не валит статус
                 self.log("exception", "распознавание пресета")
                 current = None
+            try:
+                infos = strategies_mod.list_strategies(
+                    self.zapret_root, st.strategy)
+            except Exception:  # noqa: BLE001 - список стратегий не валит статус
+                self.log("exception", "список стратегий")
+                infos = []
         settings = paths.read_settings()
 
         # Папка релиза и служба - разные сущности: «скачал релиз» ≠
@@ -124,11 +146,23 @@ class App:
                      "пресет не применён или служба удалена вне интерфейса "
                      "(service.bat / ручная чистка)")
 
+        strategy_file = strategies_mod.current_file(self.zapret_root, st)
         return {
             "installed": st.installed,
             "running": st.running,
             "start_type": st.start_type,
             "strategy": st.strategy,
+            # имя файла и короткая метка - для select'а и подсветки:
+            # метка реестра («general (ALT11)») для GUI слишком длинная
+            "strategy_file": strategy_file,
+            "strategy_label": (paths.strategy_label(strategy_file)
+                               if strategy_file else (st.strategy or "")),
+            "strategy_mode": strategies_mod.mode(),
+            "strategies": [{"file": info.file, "label": info.label,
+                            "active": info.active} for info in infos],
+            "auto_last_at": autoswitch.last_run(),
+            "auto_last_strategy": autoswitch.last_strategy(),
+            "auto_cooldown_left": autoswitch.cooldown_left(),
             "pid": st.pid,
             "dir_ok": dir_ok,
             "preset_key": current.key if current else None,
@@ -144,10 +178,22 @@ class App:
         }
 
     def presets(self) -> list[dict]:
+        """Пресеты для GUI: strategy - та, что реально будет поставлена.
+
+        ``strategy`` берётся из выбора пользователя (core.strategies),
+        ``default_strategy`` - значение из самого пресета. Фронт показывает
+        effective, чтобы подтверждение «Пресет X» не обещало ALT11, когда
+        выбрано что-то другое.
+        """
+        root = self.zapret_root
         return [
             {"key": p.key, "title": p.title, "description": p.description,
-             "strategy": p.strategy, "game_filter": p.game_filter,
+             "strategy": "" if p.off else strategies_mod.resolve(
+                 p.strategy, root),
+             "default_strategy": p.strategy,
+             "game_filter": p.game_filter,
              "ipset": p.ipset, "exclude_domains": list(p.exclude_domains),
+             "exclude_ips": list(p.exclude_ips),
              "off": p.off}
             for p in presets_mod.load_presets()
         ]
@@ -190,7 +236,7 @@ class App:
             return {"ok": False, "error": tr("err.no_dir")}
         self._select_running = True
         try:
-            self.log("info", "автоподбор: старт")
+            self.log("info", "перебор стратегий: старт")
 
             def on_progress(data: dict) -> None:
                 self.emitter.emit("select_progress", data)
@@ -207,7 +253,7 @@ class App:
                                "total": res.get("total"),
                                "best": res.get("best"),
                                "results": res.get("results")})
-            self.log("info", f"автоподбор: лучшая {res.get('best')!r}")
+            self.log("info", f"перебор: лучшая {res.get('best')!r}")
             self.emitter.emit("state", self.state())
             return res
         finally:
@@ -215,8 +261,64 @@ class App:
 
     def select_cancel(self) -> dict:
         autoselect.cancel()
-        self.log("info", "автоподбор: запрошена отмена")
+        self.log("info", "перебор: запрошена отмена")
         return {"ok": True}
+
+    # -- смена стратегии ---------------------------------------------------
+
+    def apply_strategy(self, file: str) -> dict:
+        """Поставить выбранную стратегию; режимы установки сохраняются."""
+        if self.zapret_root is None:
+            return {"ok": False, "error": tr("err.no_dir")}
+        res = strategies_mod.apply(self.zapret_root, str(file or ""),
+                                   log=self.log)
+        self.emitter.emit("state", self.state())
+        return res
+
+    def set_strategy_mode(self, mode: str) -> dict:
+        """Включить/выключить автоподбор стратегий (manual | auto)."""
+        value = str(mode or "").strip().lower()
+        if value not in (strategies_mod.MANUAL, strategies_mod.AUTO):
+            return {"ok": False, "error": f"неизвестный режим {value!r}"}
+        if not strategies_mod.set_mode(value):
+            return {"ok": False, "error": "режим не сохранён"}
+        self.log("info", "режим смены стратегии: "
+                         + ("авто" if value == strategies_mod.AUTO else "ручной"))
+        self.emitter.emit("state", self.state())
+        return {"ok": True, "mode": value}
+
+    def auto_run(self, force: bool = False) -> dict:
+        """Автоцикл: пробы → перебор → применение лучшей стратегии.
+
+        Вызывается фронтендом при старте (если включён «авто») и после проб
+        с сбоями. ``force`` - пропустить cooldown, но режим «авто» обязателен.
+        """
+        if self._auto_running:
+            return {"ok": False, "error": "автоподбор уже идёт"}
+        if self.zapret_root is None:
+            return {"ok": False, "error": tr("err.no_dir")}
+        self._auto_running = True
+        try:
+            def on_progress(data: dict) -> None:
+                self.emitter.emit("select_progress",
+                                  {**data, "auto": True})
+
+            res = autoswitch.run(self.zapret_root, force=bool(force),
+                                 log=self.log, on_progress=on_progress,
+                                 wait=900)
+            if res.get("probes"):
+                self.last_probes = res["probes"]
+                self.emitter.emit("probes", res["probes"])
+            if res.get("results"):
+                rows = res["results"]
+                self.emitter.emit("select_progress",
+                                  {"done": len(rows), "total": len(rows),
+                                   "best": res.get("best"), "results": rows,
+                                   "auto": True})
+            self.emitter.emit("state", self.state())
+            return res
+        finally:
+            self._auto_running = False
 
     def install_release(self) -> dict:
         self.log("info", "установка: запрос последнего релиза")
@@ -310,7 +412,7 @@ class App:
 def run() -> int:
     """Создать окно и отдать управление pywebview."""
     app = App()
-    app.log("info", "запуск интерфейса (webview)")
+    app.log("info", f"запуск интерфейса (webview) - сборка {version.label()}")
 
     def guard(fn):
         """Обёртка api-метода: каждая ошибка становится журналом (с
@@ -332,6 +434,7 @@ def run() -> int:
     # инстанса не биндятся - вызов приходит ровно как из JS.
     api = type("Api", (), {})()
     api.hello = guard(app.hello)
+    api.version = guard(app.version)
     api.state = guard(app.state)
     api.presets = guard(app.presets)
     api.apply_preset = guard(app.apply_preset)
@@ -339,6 +442,9 @@ def run() -> int:
     api.ab_run = guard(app.ab_run)
     api.select_run = guard(app.select_run)
     api.select_cancel = guard(app.select_cancel)
+    api.apply_strategy = guard(app.apply_strategy)
+    api.set_strategy_mode = guard(app.set_strategy_mode)
+    api.auto_run = guard(app.auto_run)
     api.install_release = guard(app.install_release)
     api.pick_dir = guard(app.pick_dir)
     api.log_tail = guard(app.log_tail)
@@ -359,6 +465,8 @@ def run() -> int:
     for line in dlog.tail(60):
         app.emitter.emit("log", line)
 
-    webview.start(debug=False)
+    # --debug: DevTools WebView2 - консоль JS видна, пока правим фронтенд
+    # (в собранном exe флага нет, debug остаётся False)
+    webview.start(debug="--debug" in sys.argv)
     app.log("info", "интерфейс закрыт")
     return 0

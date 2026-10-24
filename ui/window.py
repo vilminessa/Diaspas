@@ -16,16 +16,18 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from core import abtest, autoselect, presets as presets_mod, probes, release, service
+import version
+from core import abtest, autoselect, autoswitch, presets as presets_mod, probes, release, service
 from core import log as dlog
-from core import paths
+from core import paths, strategies as strategies_mod
 from i18n import tr
 
 
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title(tr("app.title"))
+        # подпись сборки в заголовке: по ней видно, из какого тега взят exe
+        self.title(f"{tr('app.title')} - сборка {version.label()}")
         self.geometry("900x720")
         self.minsize(760, 600)
 
@@ -36,8 +38,12 @@ class App(tk.Tk):
         self._last_ab: dict | None = None
         self._last_select: dict | None = None
         self._last_probe_report: dict | None = None
+        self._strategy_infos: list[strategies_mod.StrategyInfo] = []
+        self._auto_checked = False      # авто при старте - один раз на сессию
+        self._auto_running = False
 
         self._build()
+        self.log("info", f"запуск интерфейса (Tkinter) - сборка {version.label()}")
         self.after(120, self._pump)
         self.after(200, self._initial_state)
 
@@ -65,6 +71,25 @@ class App(tk.Tk):
         self._release_var = tk.StringVar(value="")
         ttk.Label(row, textvariable=self._release_var,
                   foreground="#666").pack(side="left", padx=(10, 0))
+
+        # смена стратегии: ручная (combobox) + авто-режим
+        srow = ttk.Frame(card)
+        srow.pack(fill="x", pady=(6, 0))
+        self._strategy_combo = ttk.Combobox(srow, width=24, state="readonly",
+                                            values=[])
+        self._strategy_combo.pack(side="left")
+        self._strategy_btn = ttk.Button(srow, text=tr("strategies.apply"),
+                                        command=self.apply_strategy)
+        self._strategy_btn.pack(side="left", padx=(6, 0))
+        self._auto_var = tk.BooleanVar(value=False)
+        self._auto_check = ttk.Checkbutton(srow, text=tr("strategies.auto"),
+                                           variable=self._auto_var,
+                                           command=self.toggle_auto)
+        self._auto_check.pack(side="left", padx=(6, 0))
+        self._strategy_note = tk.StringVar(value="")
+        ttk.Label(srow, textvariable=self._strategy_note, foreground="#666",
+                  wraplength=420, justify="left").pack(side="left",
+                                                       padx=(10, 0))
 
         # 2. пресеты
         pf = ttk.LabelFrame(root, text=tr("presets.title"), padding=8)
@@ -115,6 +140,10 @@ class App(tk.Tk):
                                       command=autoselect.cancel,
                                       state="disabled")
         self._cancel_btn.pack(side="left", padx=(6, 0))
+        self._best_apply_btn = ttk.Button(row3, text=tr("select.use"),
+                                          command=self.apply_best_selected,
+                                          state="disabled")
+        self._best_apply_btn.pack(side="left", padx=(6, 0))
         self._select_best = tk.StringVar(value=tr("select.none"))
         ttk.Label(row3, textvariable=self._select_best).pack(side="left",
                                                              padx=(10, 0))
@@ -178,6 +207,8 @@ class App(tk.Tk):
                     self._render_progress(payload[0])
                 elif kind == "select_done":
                     self._render_select_done(payload[0])
+                elif kind == "auto_done":
+                    self._render_auto(payload[0])
                 elif kind == "busy":
                     self._set_busy(payload[0])
                 elif kind == "release":
@@ -196,6 +227,23 @@ class App(tk.Tk):
         for btn in (self._probe_btn, self._ab_btn, self._select_btn):
             btn.configure(state=state)
         self._cancel_btn.configure(state="normal" if busy else "disabled")
+        self._sync_strategy_controls()
+
+    def _sync_strategy_controls(self) -> None:
+        """Доступность контролов стратегии: занято, авто-режим, нет папки.
+
+        В авто-режиме ручная смена заблокирована - пользователь видит, что
+        стратегию выбирает подбор, а не он (в webview та же логика).
+        """
+        auto = strategies_mod.mode() == strategies_mod.AUTO
+        no_dir = self._zapret_root is None
+        locked = self._busy or auto or no_dir
+        self._strategy_combo.configure(
+            state="disabled" if locked else "readonly")
+        self._strategy_btn.configure(
+            state="disabled" if locked else "normal")
+        self._auto_check.configure(
+            state="disabled" if self._busy or no_dir else "normal")
 
     def _bg(self, fn, *args, **kwargs) -> None:
         """Запустить в фоне; исходная ошибка попадает в журнал (с диска)."""
@@ -252,6 +300,44 @@ class App(tk.Tk):
         for key, btn in self._preset_buttons.items():
             btn.configure(text=self._preset_title(key)
                           + (" ●" if key == active else ""))
+
+        self._render_strategy(state, root)
+
+    def _render_strategy(self, state: service.ServiceState,
+                         root: Path | None) -> None:
+        """Список стратегий, текущая, режим и пауза автоподбора."""
+        infos = strategies_mod.list_strategies(root, state.strategy)
+        self._strategy_infos = infos
+        self._strategy_combo.configure(values=[i.label for i in infos])
+        idx = next((k for k, i in enumerate(infos) if i.active), -1)
+        if idx >= 0:
+            self._strategy_combo.current(idx)
+        else:
+            self._strategy_combo.set(state.strategy or "")
+
+        auto = strategies_mod.mode() == strategies_mod.AUTO
+        self._auto_var.set(auto)
+        self._sync_strategy_controls()
+
+        parts: list[str] = []
+        if auto:
+            parts.append(tr("strategies.auto_on"))
+            left = autoswitch.cooldown_left()
+            if left > 0:
+                parts.append(tr("strategies.auto_cooldown", minutes=left // 60))
+        else:
+            parts.append(tr("strategies.manual"))
+        last = autoswitch.last_strategy()
+        if last:
+            parts.append(tr("strategies.auto_last",
+                            label=paths.strategy_label(last)))
+        self._strategy_note.set(" · ".join(parts))
+
+        # Авто при старте: проверяем доступность и, если есть сбои, подбираем
+        # стратегию. Один раз на сессию, только когда служба работает.
+        if auto and state.running and not self._auto_checked:
+            self._auto_checked = True
+            self._bg(self._auto_worker)
 
     def _preset_title(self, key: str) -> str:
         for preset in self._preset_list:
@@ -345,6 +431,115 @@ class App(tk.Tk):
         """Обновить состояние прямо в текущем фоновом потоке."""
         self._state_worker()
 
+    # -- смена стратегии ---------------------------------------------------
+
+    def apply_strategy(self) -> None:
+        """Поставить стратегию из combobox; режимы установки не меняются."""
+        if self._busy or self._zapret_root is None:
+            return
+        idx = self._strategy_combo.current()
+        if idx < 0 or idx >= len(self._strategy_infos):
+            messagebox.showwarning("Diaspas", tr("strategies.pick"),
+                                   parent=self)
+            return
+        info = self._strategy_infos[idx]
+        if info.active:
+            messagebox.showinfo("Diaspas", tr("strategies.already_active"),
+                                parent=self)
+            return
+        if messagebox.askyesno("Diaspas",
+                               tr("strategies.apply_confirm", label=info.label),
+                               parent=self) is not True:
+            return
+        self._bg(self._strategy_worker, info.file)
+
+    def apply_best_selected(self) -> None:
+        """«Взять эту»: применить победителя перебора как ручную стратегию."""
+        if self._busy or self._zapret_root is None:
+            return
+        best = (self._last_select or {}).get("best")
+        if not best:
+            return
+        if messagebox.askyesno("Diaspas",
+                               tr("strategies.best_confirm",
+                                  label=paths.strategy_label(str(best))),
+                               parent=self) is not True:
+            return
+        self._bg(self._strategy_worker, str(best))
+
+    def _strategy_worker(self, strategy_file: str) -> None:
+        self._q.put(("busy", True))
+        try:
+            res = strategies_mod.apply(self._zapret_root, strategy_file,
+                                       log=self.log)
+            if not res.get("ok"):
+                self._q.put(("error", str(res.get("error"))))
+            # успех уже записан в журнал из core.strategies.apply
+            self.check_state_no_bg()
+        finally:
+            self._q.put(("busy", False))
+
+    def toggle_auto(self) -> None:
+        want = (strategies_mod.AUTO if self._auto_var.get()
+                else strategies_mod.MANUAL)
+        if want == strategies_mod.AUTO:
+            if messagebox.askyesno("Diaspas", tr("strategies.auto_confirm"),
+                                   parent=self) is not True:
+                self._auto_var.set(False)
+                self._sync_strategy_controls()
+                return
+        strategies_mod.set_mode(want)
+        self.log("info", tr("strategies.mode_set",
+                            mode="авто" if want == strategies_mod.AUTO else "ручной"))
+        self._sync_strategy_controls()
+        self._state_worker()
+
+    def _auto_worker(self, report: dict | None = None,
+                     force: bool = False) -> None:
+        """Автоцикл: пробы → перебор с остановкой на первой рабочей → применение."""
+        if self._auto_running or self._zapret_root is None:
+            return
+        self._auto_running = True
+        self._q.put(("busy", True))
+        try:
+            def on_progress(data: dict) -> None:
+                self._q.put(("progress", {**data, "auto": True}))
+
+            res = autoswitch.run(self._zapret_root, report=report, force=force,
+                                 log=self.log, on_progress=on_progress,
+                                 wait=900)
+            self._q.put(("auto_done", res))
+            if res.get("probes"):
+                self._q.put(("probes", res["probes"]))
+            self._state_worker()
+        finally:
+            self._auto_running = False
+            self._q.put(("busy", False))
+
+    def _render_auto(self, res: dict) -> None:
+        if not res.get("ok"):
+            text = res.get("error") or tr("strategies.auto_off")
+            self._select_best.set(f"{tr('select.best')}: {text}")
+            return
+        if res.get("applied"):
+            label = res.get("label") or paths.strategy_label(
+                str(res.get("best") or ""))
+            # вывод уже в журнале из core.autoswitch.run
+            self._select_best.set(tr("strategies.auto_applied", label=label))
+        else:
+            reason = res.get("reason") or ""
+            text = {
+                "off": tr("strategies.auto_off"),
+                "full": tr("strategies.auto_full"),
+                "cooldown": tr("strategies.auto_cooldown",
+                               minutes=int(res.get("cooldown_left") or 0) // 60),
+                "preset_off": tr("strategies.auto_preset_off"),
+                "none": tr("strategies.auto_none"),
+                "already": tr("strategies.auto_already"),
+            }.get(reason, reason)
+            self._select_best.set(f"авто: {text}")
+        self._sync_strategy_controls()
+
     # -- пробы и A/B ---------------------------------------------------------
 
     def run_probes(self) -> None:
@@ -358,6 +553,11 @@ class App(tk.Tk):
             self._probe_var.set(tr("probe.running"))
             report = probes.probe_all(timeout=6.0)
             self._q.put(("probes", report))
+            # В авто-режиме сбой проб - триггер: подбор и применение
+            # лучшей стратегии прямо в этом же фоновом потоке.
+            if (strategies_mod.mode() == strategies_mod.AUTO
+                    and report.get("state") != "full" and report.get("total")):
+                self._auto_worker(report=report)
         finally:
             self._q.put(("busy", False))
 
@@ -473,8 +673,9 @@ class App(tk.Tk):
             self._progress.configure(mode="determinate")
         self._progress.configure(maximum=max(total, 1), value=done)
         best = data.get("best")
+        prefix = "авто: " if data.get("auto") else ""
         self._select_best.set(
-            f"{tr('select.progress', done=done, total=total)}  "
+            f"{prefix}{tr('select.progress', done=done, total=total)}  "
             f"{tr('select.best')}: {best or '—'}")
         # журнал по ходу: последняя стратегия из прогресса
         results = data.get("results") or []
@@ -501,28 +702,24 @@ class App(tk.Tk):
             self.log("info",
                      f" {mark} {row['label']:<16} {row['state']:<8} "
                      f"{row['count']}/{row['total']} {groups}")
-        # предложить применить лучший пресет со стратегией-победителем
+        # победитель: кнопка «Взять эту» и сразу предложение применить
         if best:
+            self._best_apply_btn.configure(state="normal")
             self._offer_best(best)
+        else:
+            self._best_apply_btn.configure(state="disabled")
 
     def _offer_best(self, strategy_file: str) -> None:
-        """После перебора: подставить победителя в пресет Apex/EA (или первый)."""
-        target = None
-        for preset in self._preset_list:
-            if preset.key == "apex_ea":
-                target = preset
-                break
-        if target is None:
-            return
-        from dataclasses import replace
-        candidate = replace(target, strategy=strategy_file,
-                            title=f"{target.title} ({paths.strategy_label(strategy_file)})")
-        if messagebox.askyesno(
-                "Diaspas",
-                f"Лучшая стратегия: {paths.strategy_label(strategy_file)}.\n"
-                f"Применить пресет «{candidate.title}» с ней?",
-                parent=self) is True:
-            self._bg(self._apply_worker, candidate)
+        """После перебора: предложить поставить победителя службой.
+
+        Раньше подставлялось в пресет Apex/EA - это меняло ещё и режимы
+        (Game Filter, IPSet, списки), хотя перебор проверял только стратегию.
+        """
+        label = paths.strategy_label(strategy_file)
+        if messagebox.askyesno("Diaspas",
+                               tr("strategies.best_confirm", label=label),
+                               parent=self) is True:
+            self._bg(self._strategy_worker, strategy_file)
 
 
 def main() -> int:

@@ -6,7 +6,9 @@
 уже измеренное.
 
 Отличие от Run Tests: цели - наши (Discord, YouTube, EA, Ubisoft), а не
-список в targets.txt, и прогресс доступен вызывающему коду.
+список в targets.txt, и прогресс доступен вызывающему коду. Группы finals
+в переборе нет: цели Embark отвечают одинаково при любой стратегии (бэкенд
+в IP-исключениях), поэтому они не различают стратегии - только пробы и A/B.
 
 Перебор идёт внутри service.run_action (одна повышенная сессия): построчный
 UAC на каждую стратегию был бы невыносим.
@@ -55,7 +57,8 @@ try {
     $token = "$($req.token)"
     $root = "$($req.root)"
     $configs = @($req.configs)
-    LG "select req token=$token configs=$($configs.Count)"
+    $stopOnFull = [bool]$req.stop_on_full
+    LG "select req token=$token configs=$($configs.Count) stop_on_full=$stopOnFull"
 } catch { LG "select request failed: $($_.Exception.Message)" }
 
 $outPath = Join-Path $Work ("result-" + $token + ".json")
@@ -132,6 +135,7 @@ $results = @()
 $done = 0
 $total = $configs.Count
 $best = $null
+$early = $false
 try {
     foreach ($cfg in $configs) {
         if (Test-Cancel) { LG "select cancelled at $done"; break }
@@ -168,12 +172,19 @@ try {
         $done++
         Write-Progress ([PSCustomObject]@{ done = $done; total = $total; best = $best; results = $results })
         LG "select $name -> $($m.state) $($m.count)/$($m.total)"
+        # Авто-режиму не нужен полный рейтинг: первая полностью рабочая
+        # стратегия и есть ответ, остальные прогоны только тянут время.
+        if ($row.ok -and $stopOnFull) {
+            LG "select stop on first full"
+            $early = $true
+            break
+        }
     }
 } finally {
     Stop-Winws
 }
 
-Finish ([PSCustomObject]@{ ok = $true; action = "select"; best = $best; results = $results; done = $done; total = $total })
+Finish ([PSCustomObject]@{ ok = $true; action = "select"; best = $best; results = $results; done = $done; total = $total; early = $early })
 '''
 
 
@@ -223,11 +234,14 @@ def _register() -> bool:
 
 
 def run(root, strategies: list[str] | None = None, log=None,
-        on_progress=None, wait: float = 600.0) -> dict | None:
+        on_progress=None, wait: float = 600.0,
+        stop_on_full: bool = False) -> dict | None:
     """Перебрать стратегии, вернуть {ok, best, results} или None (нет прав).
 
     strategies - имена файлов; по умолчанию все general*.bat из root.
     on_progress(dict) получает промежуточные итоги: done/total/best/results.
+    stop_on_full - остановиться на первой стратегии, закрышей все цели
+    (авто-режиму рейтинг не нужен, а полный перебор стоит минуты).
     """
     import ctypes
     import os
@@ -252,7 +266,7 @@ def run(root, strategies: list[str] | None = None, log=None,
 
     token = str(int(time.time() * 1000))
     req = {"action": "select", "token": token, "root": str(root),
-           "configs": names}
+           "configs": names, "stop_on_full": bool(stop_on_full)}
     try:
         (work / "request.json").write_text(
             json.dumps(req, ensure_ascii=False), encoding="utf-8")

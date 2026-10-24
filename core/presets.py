@@ -7,7 +7,10 @@
 * режим IPSet (``lists/ipset-all.txt``): any (пустой файл), none (заглушка
   203.0.113.113/32), loaded (реальный список из бэкапа);
 * какие домены дописать в пользовательские списки - например ``ea.com``
-  в исключения, чтобы zapret не трогал авторизацию EA.
+  в исключения, чтобы zapret не трогал авторизацию EA;
+* какие IP (CIDR) дописать в ``ipset-exclude-user.txt`` - единственное, что
+  защищает адрес от десинка в правилах игрового фильтра: там нет
+  ``--hostlist-exclude``, поэтому домен для них ничего не значит.
 
 Применение пресета идёт по шагам без прав (запись файлов - пользовательские
 списки), а пересоздание службы уходит в service.run_action с UAC-обходом.
@@ -19,7 +22,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import batparser, service
+from . import service, strategies
 
 # Заглушка IPSet-режима «none»: адрес TEST-NET, которого нет в реальном
 # трафике - ни один пакет не совпадёт со списком (так делает service.bat).
@@ -34,6 +37,7 @@ class Preset:
     game_filter: str = ""         # all | tcp | udp | "" (не трогать)
     ipset: str = ""               # any | none | loaded | "" (не трогать)
     exclude_domains: tuple[str, ...] = ()    # в list-exclude-user.txt
+    exclude_ips: tuple[str, ...] = ()        # в ipset-exclude-user.txt (CIDR)
     general_domains: tuple[str, ...] = ()    # в list-general-user.txt
     description: str = ""
 
@@ -82,6 +86,22 @@ DEFAULT_PRESETS: tuple[Preset, ...] = (
                     "закрыты на уровне сети - обход их не открывает.",
     ),
     Preset(
+        key="the_finals",
+        title="The Finals",
+        strategy="general (ALT11).bat",
+        game_filter="all", ipset="any",
+        exclude_domains=SAFE_EXCLUDE + ("embark.io", "api.embark.io"),
+        exclude_ips=("34.49.47.233/32",),
+        general_domains=(),
+        description="Игровые порты TCP и UDP открыты: серверы матча идут "
+                    "за пределами стандартных диапазонов zapret (443 и "
+                    "диапазоны Discord/Stun). Бэкенд Embark отвечает и без "
+                    "обхода, поэтому в исключениях и по домену, и по IP: "
+                    "правила игрового фильтра не читают hostlist-exclude, "
+                    "только ipset-exclude. Домены самой игры припаркованы "
+                    "(лендер «for sale») и в пробах не участвуют.",
+    ),
+    Preset(
         key="games_max",
         title="Максимум для игр",
         strategy="general (ALT11).bat",
@@ -116,6 +136,7 @@ def load_presets() -> list[Preset]:
                 game_filter=str(item.get("game_filter") or ""),
                 ipset=str(item.get("ipset") or ""),
                 exclude_domains=tuple(item.get("exclude_domains") or ()),
+                exclude_ips=tuple(item.get("exclude_ips") or ()),
                 general_domains=tuple(item.get("general_domains") or ()),
                 description=str(item.get("description") or ""),
             ))
@@ -182,18 +203,19 @@ def _write_ipset(root: Path, mode: str) -> None:
                 "«Update IPSet List» в service.bat или выберите any")
 
 
-def _merge_domains(path: Path, domains: tuple[str, ...]) -> None:
-    """Дописать домены в пользовательский список, не задевая чужие строки.
+def _merge_entries(path: Path, entries: tuple[str, ...]) -> None:
+    """Дописать строки в пользовательский список, не задевая чужие.
 
-    Домен добавляется один раз; комментарий-заголовок Diaspas ставится
-    при первой вставке, чтобы потом можно было отличить своё от чужого.
+    Работает и с доменами, и с CIDR: запись добавляется один раз, а
+    комментарий-заголовок Diaspas ставится при первой вставке, чтобы потом
+    можно было отличить своё от чужого.
     """
-    if not domains:
+    if not entries:
         return
     existing = path.read_text(encoding="utf-8",
                               errors="replace").splitlines() if path.is_file() else []
     present = {line.strip().lower() for line in existing}
-    missing = [d for d in domains if d.lower() not in present]
+    missing = [d for d in entries if d.lower() not in present]
     if not missing:
         return
     if existing and existing[-1].strip():
@@ -206,26 +228,43 @@ def _merge_domains(path: Path, domains: tuple[str, ...]) -> None:
     path.write_text("\r\n".join(existing) + "\r\n", encoding="utf-8")
 
 
-def apply_files(root: Path, preset: Preset) -> None:
-    """Всё, что можно сделать без прав: флаги, ipset, пользовательские списки."""
+def apply_files(root: Path, preset: Preset,
+                strategy_file: str | None = None) -> None:
+    """Всё, что можно сделать без прав: флаги, ipset, пользовательские списки.
+
+    ``strategy_file`` - стратегия, которую собираются ставить (выбор
+    пользователя из :mod:`core.strategies`); по умолчанию - стратегия пресета.
+    Проверяется существование именно того файла, который будет установлен.
+    """
     ensure_user_lists(root)   # до всего: без них winws не стартует
+    strategy = preset.strategy if strategy_file is None else strategy_file
     if not preset.off:
-        if preset.strategy and not (root / preset.strategy).is_file():
-            raise FileNotFoundError(f"нет стратегии {preset.strategy}")
+        if strategy and not (root / strategy).is_file():
+            raise FileNotFoundError(f"нет стратегии {strategy}")
         _write_flag(root, preset.game_filter)
         _write_ipset(root, preset.ipset)
-    _merge_domains(root / "lists" / "list-exclude-user.txt",
+    _merge_entries(root / "lists" / "list-exclude-user.txt",
                    preset.exclude_domains)
-    _merge_domains(root / "lists" / "list-general-user.txt",
+    _merge_entries(root / "lists" / "ipset-exclude-user.txt",
+                   preset.exclude_ips)
+    _merge_entries(root / "lists" / "list-general-user.txt",
                    preset.general_domains)
 
 
-def apply(preset: Preset, root: Path, log=None) -> dict:
-    """Полное применение: файлы (без прав) + служба (через помощника)."""
+def apply(preset: Preset, root: Path, log=None,
+          strategy: str | None = None) -> dict:
+    """Полное применение: файлы (без прав) + служба (через помощника).
+
+    Стратегия берётся из выбора пользователя (:func:`strategies.resolve`),
+    если такой выбор есть: ``Preset.strategy`` - значение по умолчанию, а
+    не приказ. ``strategy`` переобходит оба источника (одноразовый выбор,
+    например победитель перебора стратегий).
+    """
+    effective = strategy or strategies.resolve(preset.strategy, root)
     if log:
         log("info", f"пресет «{preset.title}»: подготовка файлов")
     try:
-        apply_files(root, preset)
+        apply_files(root, preset, effective)
     except (OSError, FileNotFoundError) as exc:
         if log:
             log("error", str(exc))
@@ -237,31 +276,13 @@ def apply(preset: Preset, root: Path, log=None) -> dict:
         res = service.remove(log=log)
         return _finish(preset, res, log)
 
-    # Портовые диапазоны Game Filter: "12" у service.bat = фильтр выключен.
-    gf = preset.game_filter if preset.game_filter in ("all", "tcp", "udp") else ""
-    tcp = "1024-65535" if gf in ("all", "tcp") else "12"
-    udp = "1024-65535" if gf in ("all", "udp") else "12"
-
     if log:
-        log("info", f"пересоздание службы: {preset.strategy}")
-    try:
-        binpath = batparser.winws_command(root, preset.strategy, tcp, udp)
-    except batparser.BatParseError as exc:
-        if log:
-            log("error", str(exc))
-        return {"ok": False, "error": str(exc)}
-
-    label = _label(preset.strategy)
-    res = service.install_strategy(binpath, label, log=log)
-    return _finish(preset, res, log)
+        log("info", f"пересоздание службы: {effective}")
+    res = strategies.install(root, effective, preset.game_filter, log=log)
+    return _finish(preset, res, log, effective)
 
 
-def _label(strategy_file: str) -> str:
-    from .paths import strategy_stem
-    return strategy_stem(strategy_file)
-
-
-def _finish(preset: Preset, res: dict, log=None) -> dict:
+def _finish(preset: Preset, res: dict, log=None, strategy: str = "") -> dict:
     if not res.get("ok"):
         err = str(res.get("error") or "операция не выполнена")
         if log:
@@ -271,19 +292,39 @@ def _finish(preset: Preset, res: dict, log=None) -> dict:
     # одинаково (SAFE_EXCLUDE сделал их сигнатуры идентичными), и
     # инференс по состоянию не может сказать, какой из них применили -
     # подсветка всегда показывала первый по порядку.
-    _remember_active(preset.key)
+    remember_active(preset.key)
+    # Заодно запоминаем поставленную стратегию: без этого смена пресета
+    # каждый раз возвращала бы ALT11 из пресета вместо выбранной вручную.
+    if strategy:
+        strategies.remember(strategy)
     if log:
         log("info", f"пресет «{preset.title}» применён")
     return {"ok": True, "preset": preset.key,
-            "state": res.get("state") or {}}
+            "strategy": strategy, "state": res.get("state") or {}}
 
 
-def _remember_active(key: str) -> None:
+def remember_active(key: str) -> None:
     """Сохранить ключ активного пресета в настройки."""
     from . import paths
     settings = paths.read_settings()
     settings["active_preset"] = key
     paths.write_settings(settings)
+
+
+def suggested_preset() -> Preset:
+    """Пресет, который предложить, когда службы нет: маркер или базовый.
+
+    Маркер ``off`` означает «обход выключен намеренно» - предлагать его для
+    создания службы нельзя, возвращаем базовый пресет без игровых фильтров.
+    """
+    all_presets = load_presets()
+    key = active_preset_key()
+    if key:
+        marked = next((p for p in all_presets if p.key == key and not p.off),
+                      None)
+        if marked is not None:
+            return marked
+    return next((p for p in all_presets if not p.off), DEFAULT_PRESETS[0])
 
 
 def active_preset_key() -> str | None:
@@ -295,12 +336,27 @@ def active_preset_key() -> str | None:
 
 @dataclass(frozen=True)
 class _Snapshot:
-    """Что реально лежит в установке - всё, по чему сравниваются пресеты."""
+    """Что реально лежит в установке: режимы пресета + стоящая стратегия.
+
+    Стратегию читаем для отображения и журнала: сравнение пресетов идёт по
+    режимам (см. :func:`_matches`).
+    """
 
     strategy_file: str
     game_filter: str
     ipset: str
     excludes: frozenset[str]
+    excludes_ip: frozenset[str]
+
+
+def _read_list(path: Path) -> frozenset[str]:
+    """Строки пользовательского списка: комментарии и пустые не считаем."""
+    if not path.is_file():
+        return frozenset()
+    lines = {line.strip().lower()
+             for line in path.read_text(encoding="utf-8",
+                                        errors="replace").splitlines()}
+    return frozenset(line for line in lines if line and not line.startswith("#"))
 
 
 def _snapshot(root: Path, state: service.ServiceState) -> _Snapshot:
@@ -331,32 +387,36 @@ def _snapshot(root: Path, state: service.ServiceState) -> _Snapshot:
         else:
             ipset = "loaded"
 
-    excludes: set[str] = set()
-    exclude_file = root_path / "lists" / "list-exclude-user.txt"
-    if exclude_file.is_file():
-        for line in exclude_file.read_text(encoding="utf-8",
-                                           errors="replace").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                excludes.add(line.lower())
-
     return _Snapshot(strategy_file=strategy_file, game_filter=game_filter,
-                     ipset=ipset, excludes=frozenset(excludes))
+                     ipset=ipset,
+                     excludes=_read_list(root_path / "lists" /
+                                         "list-exclude-user.txt"),
+                     excludes_ip=_read_list(root_path / "lists" /
+                                            "ipset-exclude-user.txt"))
 
 
 def _matches(preset: Preset, snap: _Snapshot) -> bool:
-    """Сигнара пресета (то, что он обещает) содержится в снимке."""
+    """Сигнара пресета (то, что он обещает) содержится в снимке.
+
+    Стратегию не сравниваем: она теперь отдельная ось
+    (:mod:`core.strategies`), а пресет описывает режимы. Подсветка обязана
+    показывать применённый пресет даже после ручной смены ALT11 -> ALT7,
+    иначе выбор стратегии «гасил» бы подсветку.
+    """
     if preset.off:
         return False   # off проверяется отдельно - по факту службы
-    if preset.strategy != snap.strategy_file:
-        return False
     wanted_gf = preset.game_filter if preset.game_filter in (
         "all", "tcp", "udp") else ""
     if wanted_gf != snap.game_filter:
         return False
     if preset.ipset and preset.ipset != snap.ipset:
         return False
-    return all(d.lower() in snap.excludes for d in preset.exclude_domains)
+    if not all(d.lower() in snap.excludes for d in preset.exclude_domains):
+        return False
+    # IP-исключения: для правил игрового фильтра это единственная защита,
+    # поэтому пресет считается применённым только когда CIDR действительно
+    # лежит в ipset-exclude-user.txt.
+    return all(cid.lower() in snap.excludes_ip for cid in preset.exclude_ips)
 
 
 def current_preset(root: Path | None, state: service.ServiceState,
@@ -387,7 +447,8 @@ def current_preset(root: Path | None, state: service.ServiceState,
             return marked
 
     # 2. инференс: состояние может соответствовать нескольким пресетам
-    # (списки накапливаются), поэтому выбираем точность покрытия
+    # (списки накапливаются), поэтому выбираем точность покрытия - и домены,
+    # и IP: пресет с IP-исключением конкретнее, чем «Максимум для игр».
     best: Preset | None = None
     best_score = -1
     for preset in all_presets:
@@ -395,6 +456,8 @@ def current_preset(root: Path | None, state: service.ServiceState,
             continue
         score = sum(1 for d in preset.exclude_domains
                     if d.lower() in snap.excludes)
+        score += sum(1 for cid in preset.exclude_ips
+                     if cid.lower() in snap.excludes_ip)
         if score > best_score:
             best, best_score = preset, score
     return best

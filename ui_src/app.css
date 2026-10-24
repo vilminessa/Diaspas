@@ -209,6 +209,26 @@ select {
 }
 select:focus { outline: none; border-color: var(--accent); }
 
+/* ── переключатель стратегии ───────────────────────────────── */
+.strategy-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.strategy-row select { min-width: 210px; }
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+.check input { accent-color: var(--accent); width: 15px; height: 15px; }
+.check.off { opacity: .45; cursor: default; }
+
 /* ── чипы проб ─────────────────────────────────────────────── */
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip {
@@ -334,6 +354,9 @@ select:focus { outline: none; border-color: var(--accent); }
   font-size: 12.5px;
 }
 .statusbar .right { margin-left: auto; max-width: 55vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* подпись сборки: тег релиза/беты или «unreleased» для локальной сборки */
+.statusbar .ver { color: var(--faint); white-space: nowrap; }
+.statusbar .ver.beta { color: var(--warn); }
 
 .spin {
   width: 12px; height: 12px;

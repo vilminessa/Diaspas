@@ -14,7 +14,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import paths, presets as pm  # noqa: E402
-from core.presets import DEFAULT_PRESETS, Preset, apply_files, current_preset  # noqa: E402
+from core.presets import (  # noqa: E402
+    DEFAULT_PRESETS,
+    Preset,
+    active_preset_key,
+    apply_files,
+    current_preset,
+    remember_active,
+)
 from core.service import ServiceState  # noqa: E402
 
 ALT11_STATE = ServiceState(installed=True, running=True,
@@ -54,7 +61,7 @@ def test_marker_wins_over_identical_signatures(tmp_path, isolated_settings):
     assert inferred is not None and inferred.key == "apex_ea"
 
     # с маркером - применённый пресет
-    pm._remember_active("ubisoft")
+    pm.remember_active("ubisoft")
     assert pm.active_preset_key() == "ubisoft"
     found = current_preset(root, ALT11_STATE,
                            active_key=pm.active_preset_key())
@@ -66,13 +73,33 @@ def test_marker_ignored_when_state_diverged(tmp_path, isolated_settings):
     root = make_root(tmp_path)
     ubisoft = next(p for p in DEFAULT_PRESETS if p.key == "ubisoft")
     apply_files(root, ubisoft)          # game_filter=all, ipset=any
-    pm._remember_active("ubisoft")
+    pm.remember_active("ubisoft")
 
     # ручная правка: game filter выключен - ожидания маркера не выполняются
     (root / "utils" / "game_filter.enabled").unlink()
     found = current_preset(root, ALT11_STATE,
                            active_key=pm.active_preset_key())
     assert found is not None and found.key == "discord_youtube"
+
+
+def test_marker_survives_manual_strategy_change(tmp_path, isolated_settings):
+    """Ручная смена стратегии не гасит подсветку: пресет описывает режимы.
+
+    Регрессия новой модели: подсветка сравнивала стратегию пресета с
+    меткой реестра, и выбор ALT7 вместо ALT11 выглядел бы как «пресет
+    не распознан».
+    """
+    root = make_root(tmp_path)
+    (tmp_path / "general (ALT7).bat").write_text(
+        'start /min "%BIN%winws.exe" --wf-tcp=80\r\n', encoding="utf-8")
+    ubisoft = next(p for p in DEFAULT_PRESETS if p.key == "ubisoft")
+    apply_files(root, ubisoft)
+    remember_active("ubisoft")
+
+    alt7 = ServiceState(installed=True, running=True, start_type="Automatic",
+                        strategy="general (ALT7)", pid=1, binpath="")
+    found = current_preset(root, alt7, active_key=active_preset_key())
+    assert found is not None and found.key == "ubisoft"
 
 
 def test_no_marker_falls_back_to_inference(tmp_path, isolated_settings):
@@ -89,7 +116,7 @@ def test_unknown_marker_ignored(tmp_path, isolated_settings):
     root = make_root(tmp_path)
     apex = next(p for p in DEFAULT_PRESETS if p.key == "apex_ea")
     apply_files(root, apex)
-    pm._remember_active("deleted_preset")
+    pm.remember_active("deleted_preset")
     found = current_preset(root, ALT11_STATE,
                            active_key=pm.active_preset_key())
     assert found is not None and found.key == "apex_ea"
@@ -100,7 +127,7 @@ def test_off_marker_not_used_for_highlight(tmp_path, isolated_settings):
     root = make_root(tmp_path)
     apex = next(p for p in DEFAULT_PRESETS if p.key == "apex_ea")
     apply_files(root, apex)
-    pm._remember_active("off")
+    pm.remember_active("off")
     found = current_preset(root, ALT11_STATE,
                            active_key=pm.active_preset_key())
     assert found is not None and found.key == "apex_ea"
@@ -110,7 +137,7 @@ def test_failed_apply_keeps_old_marker(tmp_path, isolated_settings,
                                        monkeypatch):
     """Неудачное применение не перетирает маркер прежнего пресета."""
     root = make_root(tmp_path)
-    pm._remember_active("ubisoft")
+    pm.remember_active("ubisoft")
 
     monkeypatch.setattr(pm.service, "install_strategy",
                         lambda *a, **k: {"ok": False, "error": "нет прав"})

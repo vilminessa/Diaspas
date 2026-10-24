@@ -1,9 +1,17 @@
-"""Smoke-тест exe: запустить, дождаться окна, закрыть."""
+"""Smoke-тест exe: запустить, дождаться окна, закрыть.
+
+Путь по умолчанию - ``<репозиторий>/dist/Diaspas.exe`` (результат
+``pyinstaller diaspas.spec``); первым аргументом можно задать другой exe.
+"""
 import subprocess
 import sys
 import time
+from pathlib import Path
 
-EXE = r"B:\projs\Diaspas\dist\Diaspas.exe"
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_EXE = ROOT / "dist" / "Diaspas.exe"
+sys.path.insert(0, str(ROOT / "tests"))
+from _console import decode  # noqa: E402 - вывод PowerShell в OEM-кодовке
 
 FIND_WINDOW = r'''
 Add-Type @"
@@ -32,7 +40,11 @@ if ($found) { $found } else { "окон с Diaspas нет" }
 '''
 
 if __name__ == "__main__":
-    proc = subprocess.Popen([EXE])
+    exe = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_EXE
+    if not exe.is_file():
+        print(f"нет {exe} - сначала соберите: pyinstaller diaspas.spec")
+        sys.exit(1)
+    proc = subprocess.Popen([str(exe)])
     print(f"запущен PID {proc.pid}")
     time.sleep(8)
     if proc.poll() is not None:
@@ -40,8 +52,8 @@ if __name__ == "__main__":
         sys.exit(1)
     print("процесс жив")
     out = subprocess.run(["powershell", "-NoProfile", "-Command", FIND_WINDOW],
-                         capture_output=True, text=True, timeout=30)
-    print(out.stdout.strip() or out.stderr.strip())
+                         capture_output=True, timeout=30)
+    print(decode(out.stdout).strip() or decode(out.stderr).strip())
     # PyInstaller onefile = два процесса (bootstrap + приложение): убиваем
     # дерево, иначе дочерний сиротеет с висящим окном
     subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],

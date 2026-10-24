@@ -38,7 +38,7 @@ RU: dict[str, str] = {
     "probe.verdict": "Вывод",
     "probe.group_off": "группа выключена",
 
-    "select.title": "Автоподбор стратегий",
+    "select.title": "Перебор стратегий",
     "select.run": "Перебрать стратегии",
     "select.running": "перебор идёт...",
     "select.cancel": "Прервать",
@@ -46,6 +46,32 @@ RU: dict[str, str] = {
     "select.none": "не подобрана",
     "select.progress": "{done}/{total}",
     "select.use": "Взять эту",
+
+    "strategies.apply": "Применить стратегию",
+    "strategies.auto": "Авто",
+    "strategies.manual": "выбор вручную: стратегия сохраняется при смене пресета",
+    "strategies.auto_on": "авто: подбор при запуске и после проб с сбоями",
+    "strategies.auto_cooldown": "следующий подбор через {minutes} мин",
+    "strategies.auto_last": "авто применяло {label}",
+    "strategies.auto_confirm": (
+        "Diaspas будет проверять доступность сервисов при запуске и после проб\n"
+        "с сбоями, перебирать стратегии и сам применит лучшую. Служба будет\n"
+        "пересоздаваться. Подбор — не чаще одного раза в 30 минут.\n\nВключить?"),
+    "strategies.mode_set": "режим смены стратегии: {mode}",
+    "strategies.apply_confirm": (
+        "Служба zapret будет пересоздана со стратегией «{label}».\n"
+        "Game Filter, IPSet и списки доменов останутся как сейчас.\n\nПродолжить?"),
+    "strategies.already_active": "Эта стратегия уже активна.",
+    "strategies.pick": "Выберите стратегию из списка.",
+    "strategies.applied": "стратегия {label} применена",
+    "strategies.auto_applied": "авто: применена {label}",
+    "strategies.best_confirm": (
+        "Лучшая стратегия: {label}.\nПрименить её? Текущие режимы сохранятся."),
+    "strategies.auto_full": "всё отвечает — менять нечего",
+    "strategies.auto_none": "полной стратегии не найдено — оставляю текущую",
+    "strategies.auto_already": "лучшая стратегия уже активна",
+    "strategies.auto_preset_off": "пресет «Выкл»: обход выключен намеренно",
+    "strategies.auto_off": "режим выключен",
 
     "release.title": "Установка zapret",
     "release.install": "Скачать последний релиз",

@@ -1,4 +1,4 @@
-"""TLS-пробы целевых сервисов: Discord, YouTube, EA, Ubisoft.
+"""TLS-пробы целевых сервисов: Discord, YouTube, EA, Ubisoft, The Finals.
 
 Замер - как в dpi.py из Synfronia: рукопожатие без проверки сертификата
 (важен сам факт прохождения) плюс GET, успех = любой HTTP-ответ. Отдельно
@@ -21,7 +21,7 @@ DEFAULT_TIMEOUT = 6.0
 
 # (имя группы, [(подпись цели, url), ...])
 # Список покрывает то, что ломалось у нас: авторизация EA/Ubisoft,
-# Discord (веб+CDN), YouTube (веб+поток).
+# Discord (веб+CDN), YouTube (веб+поток), бэкенд The Finals (Embark).
 PROBE_GROUPS: dict[str, tuple[tuple[str, str], ...]] = {
     "discord": (
         ("web", "https://discord.com/"),
@@ -41,6 +41,19 @@ PROBE_GROUPS: dict[str, tuple[tuple[str, str], ...]] = {
         ("account", "https://account.ubisoft.com/"),
         ("connect", "https://connect.ubisoft.com/"),
         ("services", "https://public-ubiservices.ubi.com/"),
+    ),
+    # The Finals: домены самой игры припаркованы (thefinals.com - лендер
+    # «for sale» на GoDaddy/AWS, finals.game - Gandi). Зона thefinals.com
+    # имеет wildcard, поэтому api./cdn./status./matchmaking. резолвятся, но
+    # TLS отвечает «unrecognized name» (SNI не обслуживается сервером) -
+    # это мёртвый хост, а не блокировка: проба таких целей была бы красной
+    # при любой стратегии и путала A/B и автоподбор. Живой бэкенд - платформу
+    # Embark: api (GCP), events (Vercel), веб (Firebase). 404 на api не помеха:
+    # проба проверяет маршрут, а не контент.
+    "finals": (
+        ("api", "https://api.embark.io/"),
+        ("events", "https://events.embark.io/"),
+        ("web", "https://embark.io/"),
     ),
 }
 

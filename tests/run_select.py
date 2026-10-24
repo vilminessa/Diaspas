@@ -1,13 +1,16 @@
-"""Тест автоподбора на подмножестве стратегий (ручной прогон, нужен UAC)."""
+"""Тест автоподбора на подмножестве стратегий (ручной прогон, нужен UAC).
+
+Папка берётся из настроек Diaspas (или из стандартных мест), как в GUI:
+скрипт должен работать на любой машине, а не на одной с C:\\...
+"""
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core import autoselect, service  # noqa: E402
+from core import autoselect, paths, service  # noqa: E402
 
-ROOT = Path(r"C:\zapret-discord-youtube-1.10.2")
 # Три стратегии: известный рабочий кандидат и два для сравнения
 SUBSET = ["general (ALT11).bat", "general (ALT7).bat", "general (ALT12).bat"]
 
@@ -24,9 +27,17 @@ def on_progress(data: dict) -> None:
 
 
 if __name__ == "__main__":
+    root = paths.zapret_dir_from_settings()
+    if root is None:
+        print("папка zapret не найдена - укажите её в GUI или в settings.json")
+        raise SystemExit(1)
+    # подмножество может не совпасть с релизом: оставляем то, что есть
+    names = [name for name in SUBSET if (root / name).is_file()] or None
+    print(f"папка: {root}\nподмножество: {names or 'все general*.bat'}")
+
     print("служба до:", service.state().running)
     started = time.time()
-    result = autoselect.run(ROOT, strategies=SUBSET, log=log,
+    result = autoselect.run(root, strategies=names, log=log,
                             on_progress=on_progress, wait=300)
     print(f"\n=== итог за {time.time() - started:.1f}s ===")
     if result is None:
@@ -37,7 +48,7 @@ if __name__ == "__main__":
         raise SystemExit(1)
     print("лучшая:", result.get("best"))
     print("строки:")
-    for row in autoselect.summarize(result, ROOT):
+    for row in autoselect.summarize(result, root):
         star = "★" if row["best"] else " "
         print(f" {star} {row['label']:<10} {row['state']:<8} "
               f"{row['count']}/{row['total']} {row['groups']}")

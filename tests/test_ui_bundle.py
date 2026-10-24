@@ -35,6 +35,17 @@ def test_index_has_required_structure():
         'id="ab-result"',
         'id="modal"',
         'id="top-status"',
+        # смена стратегии: select + применение + авто + применение победителя
+        'id="strategy-select"',
+        'id="btn-apply-strategy"',
+        'id="auto-strategy"',
+        'id="btn-select-apply"',
+        # подпись сборки в статус-баре
+        'id="app-version"',
+        # группа The Finals в A/B-селекторе и IP-исключения в подтверждении
+        # пресета (без них игровая группа и CIDR-защита в UI не видны)
+        'value="finals"',
+        'IP-исключения',
     ):
         assert marker in INDEX_HTML, f"нет {marker}"
 

@@ -50,6 +50,18 @@
             <dt>Пресет</dt><dd id="v-preset">—</dd>
             <dt>Процесс winws</dt><dd id="v-pid" class="mono">—</dd>
           </dl>
+
+          <div class="strategy-row">
+            <label class="field">Стратегия
+              <select id="strategy-select" title="Файлы general*.bat из папки zapret"></select>
+            </label>
+            <button id="btn-apply-strategy" class="btn">Применить</button>
+            <label class="check" title="Подбор при запуске и после проб с сбоями">
+              <input type="checkbox" id="auto-strategy"> авто
+            </label>
+          </div>
+          <div id="strategy-note" class="note muted"></div>
+
           <div class="btn-row">
             <button id="btn-refresh" class="btn">Обновить</button>
             <button id="btn-pick-dir" class="btn">Указать папку…</button>
@@ -105,7 +117,8 @@
             <option value="discord">discord</option>
             <option value="youtube">youtube</option>
             <option value="ea">ea</option>
-            <option value="ubisoft" selected>ubisoft</option>
+            <option value="ubisoft">ubisoft</option>
+            <option value="finals" selected>finals</option>
           </select>
         </label>
         <button id="btn-ab" class="btn primary">Запустить A/B</button>
@@ -114,10 +127,11 @@
     </div>
 
     <div class="card">
-      <div class="card-title">Автоподбор стратегий</div>
+      <div class="card-title">Перебор стратегий</div>
       <div class="btn-row">
         <button id="btn-select" class="btn primary">Перебрать стратегии</button>
         <button id="btn-select-cancel" class="btn danger" disabled>Прервать</button>
+        <button id="btn-select-apply" class="btn primary hidden" disabled>Применить лучшую</button>
         <span id="select-progress" class="mono muted"></span>
       </div>
       <div class="progress"><div id="select-bar" class="progress-fill" style="width:0%"></div></div>
@@ -159,6 +173,7 @@
 <footer class="statusbar">
   <span id="busy-ind" class="hidden"><span class="spin"></span></span>
   <span id="statusbar-text" class="muted">готов</span>
+  <span id="app-version" class="mono ver" title="Тег сборки; unreleased — собрано не из тега"></span>
   <span id="statusbar-last" class="mono muted right"></span>
 </footer>
 

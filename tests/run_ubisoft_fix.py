@@ -5,9 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core import presets as pm, probes, service  # noqa: E402
-
-ROOT = Path(r"C:\zapret-discord-youtube-1.10.2")
+from core import paths, presets as pm, probes, service  # noqa: E402
 
 
 def log(level: str, text: str) -> None:
@@ -21,12 +19,18 @@ def show(title: str, rep: dict) -> None:
 
 
 if __name__ == "__main__":
+    root = paths.zapret_dir_from_settings()
+    if root is None:
+        print("папка zapret не найдена - укажите её в GUI или в settings.json")
+        raise SystemExit(1)
+    print(f"папка: {root}")
+
     show("ДО  ubisoft", probes.probe_group("ubisoft"))
     show("ДО  ea     ", probes.probe_group("ea"))
 
     ubisoft = next(p for p in pm.load_presets() if p.key == "ubisoft")
     print("\n=== применение пресета Ubisoft ===")
-    res = pm.apply(ubisoft, ROOT, log=log)
+    res = pm.apply(ubisoft, root, log=log)
     print("apply ok =", res.get("ok"), res.get("error", ""))
     time.sleep(2)
 
