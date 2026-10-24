@@ -26,8 +26,8 @@ from pathlib import Path
 import webview
 
 import version
-from core import abtest, autoselect, autoswitch, icons, log as dlog, paths, presets as presets_mod
-from core import probes, release, service, strategies as strategies_mod, tray
+from core import abtest, autoselect, autoswitch, log as dlog, paths, presets as presets_mod
+from core import probes, release, service, strategies as strategies_mod, tray, win32
 from i18n import tr
 from ui.bundle import INDEX_HTML
 
@@ -88,7 +88,6 @@ class App:
         self.tray: tray.Tray | None = None
         self.window_hidden = False
         self._tray_busy: set[str] = set()
-        self._icon_done = False     # иконка окна ставится один раз (в hello)
 
     # -- журнал --------------------------------------------------------
 
@@ -102,14 +101,13 @@ class App:
         """Вызывается JS при инициализации: доказательство живости моста.
 
         Если в журнале нет этой строки - окно нарисовалось, но api не
-        отвечает (типичная поломка после рефакторинга моста). Здесь же
-        ставится иконка окна: к этому моменту форма WinForms уже существует
-        (в bootstrap `win.native` ещё None).
+        отвечает (типичная поломка после рефакторинга моста). Здесь же окно
+        получает значок: к этому моменту форма создана и её handle жив, а
+        PostMessage не блокирует этот поток.
         """
         self.log("info", "фронтенд подключился: мост JS<->Python работает")
-        if self.window is not None and not self._icon_done:
-            self._icon_done = True
-            _set_window_icon(self.window, self.log)
+        if self.window is not None:
+            _post_window_icon(self.window, self.log)
         return {"ok": True, "app": "Diaspas", "ui": "webview",
                 "label": version.label()}
 
@@ -602,28 +600,31 @@ class App:
         return {"ok": True, "tray": flag}
 
 
-def _set_window_icon(win, log) -> None:
-    """Иконка окна и панели задач: pywebview на Windows её из create_window не берёт.
+def _post_window_icon(win, log) -> None:
+    """Значок окна и панели задач: WM_SETICON сообщением, не свойством формы.
 
-    Форма WinForms получает .NET Icon из temp-ICO (та же метка, что в трее),
-    поэтому значок одинаков и в прогоне из исходников (иконка python.exe
-    иначе), и в exe. Если pythonnet не поднялся - молчим: окно работает без
-    собственной иконки.
+    pywebview создаёт форму на своём потоке, и в момент создания этот поток
+    исполняет Python-колбэк. Присвоение `native.Icon = ...` из потока api-вызова
+    ждало поток-владелец формы; тот ждал GIL, а GIL держал этот же поток -
+    вставали GUI и нить трея вместе (живой процесс, py-spy: окно не отвечало,
+    меню не поднимался). PostMessage ответа не ждёт: форма обрабатывает
+    WM_SETICON сама, когда качает сообщения. HICON - из кэша трея (та же метка,
+    нейтральный инк == icons.WINDOW_INK), им владеет живой .NET Icon.
     """
-    try:
-        import clr
-        clr.AddReference("System.Drawing")
-        import System.Drawing as sd
-        from System.IO import FileStream, FileMode
-        native = getattr(win, "native", None)
-        if native is None:
-            log("warning", "иконка окна: форма ещё не создана (native=None)")
-            return
-        native.Icon = sd.Icon(FileStream(
-            str(icons.temp_ico_file(icons.WINDOW_INK)), FileMode.Open))
-        log("info", "иконка окна: метка из ICO")
-    except Exception:  # noqa: BLE001 - иконка окна не валит GUI
-        log("exception", "иконка окна")
+    if sys.platform != "win32":
+        return
+    native = getattr(win, "native", None)
+    if native is None or not getattr(native, "IsHandleCreated", False):
+        log("warning", "иконка окна: форма ещё не создана")
+        return
+    dotnet = tray._dotnet_hicon("window")   # ICON_TINTS["off"] == icons.WINDOW_INK
+    if not dotnet:
+        log("warning", "иконка окна: .NET значок не вышел")
+        return
+    handle = int(native.Handle.ToInt64())
+    for which in (win32.ICON_SMALL, win32.ICON_BIG):
+        win32.user32.PostMessageW(handle, win32.WM_SETICON, which, dotnet[0])
+    log("info", "иконка окна: метка из ICO (WM_SETICON)")
 
 
 def run() -> int:

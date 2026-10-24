@@ -7,11 +7,14 @@
 
 import sys
 import threading
+import time
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core import paths, probes, service, strategies as strategies_mod, tray  # noqa: E402
+from core import paths, probes, service, strategies as strategies_mod, tray, win32  # noqa: E402
 from ui import webapp  # noqa: E402
 
 DIR = Path("C:/zapret/zapret-discord-youtube-1.10.3")
@@ -56,6 +59,13 @@ class FakeTray:
 
     def notify(self, title: str, text: str) -> None:
         self.notices.append((title, text))
+
+    def claim_singleton(self) -> dict:
+        """Один экземпляр: этот процесс - владелец (для run())."""
+        return {"ok": True, "owner": True}
+
+    def join(self, timeout: float = 3.0) -> None:
+        pass
 
     def quit(self) -> None:
         self.quit_called = True
@@ -289,3 +299,125 @@ def test_tray_spec_reflects_busy_and_probes(tmp_path, monkeypatch):
     assert [i.id for i in strategies.items] == [
         "strategy:general (ALT7).bat", "strategy:general (ALT11).bat"]
     assert [i.checked for i in strategies.items] == [False, True]
+
+
+def test_window_icon_is_posted_not_set_on_form(monkeypatch, tmp_path):
+    """Значок окна - WM_SETICON сообщением, свойство формы не трогаем.
+
+    Регрессия зависания: `native.Icon = ...` в потоке api-вызова ждал
+    поток-владелец формы; тот ждал GIL, а GIL держал этот же поток - встали
+    GUI и нить трея вместе: окно перестало отвечать, меню не поднялось (живой
+    процесс, py-spy). PostMessage ответа не ждёт, поэтому форма ставит значок
+    сама. Фиктивная форма с `__setattr__`, который падает, - если код снова
+    тронет форму из чужого потока, тест это поймает.
+    """
+    if sys.platform != "win32":
+        pytest.skip("WM_SETICON - только Windows")
+    monkeypatch.setattr(paths, "app_dir", lambda: tmp_path)
+
+    posted: list[tuple[int, int, int, int]] = []
+
+    class FakeWin32:
+        def PostMessageW(self, hwnd, message, wparam, lparam):
+            posted.append((int(hwnd), int(message), int(wparam), int(lparam)))
+            return True
+
+    class FakeNative:
+        """Форма: читается только handle, изменение из чужого потока запрещено."""
+
+        IsHandleCreated = True
+
+        class Handle:
+            @staticmethod
+            def ToInt64() -> int:
+                return 4242
+
+        def __setattr__(self, name, value):
+            raise AssertionError(f"форма меняется из чужого потока: {name}")
+
+    scripts: list[str] = []
+
+    class IconWindow(FakeWindow):
+        native = FakeNative()
+
+        def evaluate_js(self, script) -> None:
+            scripts.append(script)
+
+    monkeypatch.setattr(win32, "user32", FakeWin32())
+    monkeypatch.setattr(tray, "_dotnet_hicon", lambda _state: (999, object()))
+
+    app = webapp.App()
+    app.window = IconWindow()
+    app.emitter.bind(app.window)      # Emitter пишет в окно только после bind
+    assert app.hello()["ok"] is True
+
+    assert posted == [(4242, win32.WM_SETICON, win32.ICON_SMALL, 999),
+                      (4242, win32.WM_SETICON, win32.ICON_BIG, 999)]
+    journal = (tmp_path / "diaspas.log").read_text(encoding="utf-8-sig")
+    assert "иконка окна: метка из ICO (WM_SETICON)" in journal
+    # строка уходит и в окно: Emitter качает её в своей нити
+    for _ in range(20):
+        if scripts:
+            break
+        time.sleep(0.05)
+    assert scripts and all("window.diaspas" in s for s in scripts)
+
+
+def test_window_icon_skipped_before_form_created(monkeypatch, tmp_path):
+    """До создания формы значок не ставится: это warning, а не зависание."""
+    if sys.platform != "win32":
+        pytest.skip("WM_SETICON - только Windows")
+    monkeypatch.setattr(paths, "app_dir", lambda: tmp_path)
+
+    posted: list[int] = []
+
+    class FakeWin32:
+        def PostMessageW(self, hwnd, *_a):
+            posted.append(int(hwnd))
+            return True
+
+    class NoForm(FakeWindow):
+        native = None
+
+    monkeypatch.setattr(win32, "user32", FakeWin32())
+    monkeypatch.setattr(tray, "_dotnet_hicon", lambda _state: (999, object()))
+
+    app = webapp.App()
+    app.window = NoForm()
+    app.hello()
+    assert posted == []
+    journal = (tmp_path / "diaspas.log").read_text(encoding="utf-8-sig")
+    assert "иконка окна: форма ещё не создана" in journal
+
+
+def test_window_icon_when_dotnet_missing(monkeypatch, tmp_path):
+    """.NET значок не вышел - окно работает без собственного значка."""
+    if sys.platform != "win32":
+        pytest.skip("WM_SETICON - только Windows")
+    monkeypatch.setattr(paths, "app_dir", lambda: tmp_path)
+
+    posted: list[int] = []
+
+    class FakeWin32:
+        def PostMessageW(self, hwnd, *_a):
+            posted.append(int(hwnd))
+            return True
+
+    class Ready(FakeWindow):
+        class native:  # noqa: N801 - как win.native у pywebview
+            IsHandleCreated = True
+
+            class Handle:
+                @staticmethod
+                def ToInt64() -> int:
+                    return 4242
+
+    monkeypatch.setattr(win32, "user32", FakeWin32())
+    monkeypatch.setattr(tray, "_dotnet_hicon", lambda _state: None)
+
+    app = webapp.App()
+    app.window = Ready()
+    app.hello()
+    assert posted == []            # значок не слался, но и не ждал формы
+    journal = (tmp_path / "diaspas.log").read_text(encoding="utf-8-sig")
+    assert "иконка окна: .NET значок не вышел" in journal

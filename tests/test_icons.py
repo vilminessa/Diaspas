@@ -188,6 +188,16 @@ def test_svg_check_tolerates_crlf_checkout(tmp_path, monkeypatch):
     assert render_icon.check_assets() == 1
 
 
+def test_window_ink_is_the_neutral_tray_tint():
+    """WM_SETICON берёт значок из кэша трея по нейтральному состоянию.
+
+    `tray._dotnet_hicon("window")` falls back to ICON_TINTS["off"], поэтому
+    инк окна (иконка taskbar и заголовка) должен совпадать с этим tint - иначе
+    окно получало бы другой цвет, чем выключенный обход в трее.
+    """
+    assert icons.WINDOW_INK == icons.TINTS["off"]
+
+
 def test_icon_names_cover_every_tray_state():
     """Ключи TINTS == состояния icon_state: трей не останется без иконки."""
     state = {"dir_ok": True, "installed": True, "running": True,

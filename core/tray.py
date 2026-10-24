@@ -367,7 +367,15 @@ if sys.platform == "win32":
     _icon_cache: dict[str, tuple[int, object]] = {}
 
     def _dotnet_hicon(state: str) -> tuple[int, object] | None:
-        """HICON монохромной метки из temp-ICO (pythonnet). None - .NET не вышел."""
+        """HICON монохромной метки из байтов ICO в памяти (pythonnet).
+
+        MemoryStream вместо файла: `.NET Icon(Stream)` держит stream живым,
+        пока жив `Icon`, и temp-ICO был бы заблокирован для других процессов -
+        тот же файл читают pywebview (`create_window(icon=...)`) и Tk
+        (`iconbitmap`). Живой зависший процесс именно держал этот файл:
+        повторное чтение давало IOException «файл используется другим
+        процессом». None - .NET не вышел.
+        """
         cached = _icon_cache.get(state)
         if cached:
             return cached
@@ -375,13 +383,12 @@ if sys.platform == "win32":
             import clr
             clr.AddReference("System.Drawing")
             import System.Drawing as sd
-            from System.IO import FileStream, FileMode
+            from System.IO import MemoryStream
         except Exception:      # noqa: BLE001 - pythonnet не установлен / не инициализирован
             return None
         rgb = ICON_TINTS.get(state, ICON_TINTS["off"])
         try:
-            icon = sd.Icon(FileStream(str(icons.temp_ico_file(rgb)),
-                                       FileMode.Open))
+            icon = sd.Icon(MemoryStream(icons.ico_bytes(rgb=rgb)))
             handle = int(icon.Handle.ToInt64())
         except Exception:      # noqa: BLE001 - ICO не прочитался
             return None
