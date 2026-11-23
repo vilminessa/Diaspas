@@ -27,6 +27,7 @@
   <button class="tab active" data-tab="overview" role="tab">Обзор</button>
   <button class="tab" data-tab="diagnostics" role="tab">Диагностика</button>
   <button class="tab" data-tab="journal" role="tab">Журнал</button>
+  <button class="tab" data-tab="tg" role="tab">Telegram</button>
 </nav>
 
 <main class="content">
@@ -227,6 +228,61 @@
         </table>
       </div>
       <div id="select-best" class="note hidden"></div>
+    </div>
+  </section>
+
+  <!-- ═══ вкладка: Telegram (TgWsProxy) ═══ -->
+  <section id="tab-tg" class="panel">
+    <div class="grid-2">
+      <div class="col">
+        <div class="card">
+          <div class="card-title row-between">
+            <span>TgWsProxy — локальный прокси Telegram</span>
+            <span id="tg-status" class="muted"></span>
+          </div>
+          <div class="hero">
+            <span id="tg-dot" class="big-dot unknown"></span>
+            <div>
+              <div id="tg-headline" class="hero-text">проверяю…</div>
+              <div id="tg-sub" class="hero-sub muted"></div>
+            </div>
+          </div>
+          <dl class="kv">
+            <dt>Версия</dt><dd id="tg-tag">—</dd>
+            <dt>Адрес</dt><dd id="tg-addr">—</dd>
+            <dt>Автозапуск</dt><dd id="tg-auto">—</dd>
+            <dt>Домены zapret</dt><dd id="tg-zlist">—</dd>
+          </dl>
+          <div class="btn-row">
+            <button id="tg-btn-install" class="btn">Установить/Обновить</button>
+            <button id="tg-btn-check" class="btn">Проверить обновление</button>
+            <button id="tg-btn-start" class="btn">Запустить</button>
+            <button id="tg-btn-stop" class="btn danger">Остановить</button>
+          </div>
+          <div class="btn-row">
+            <button id="tg-btn-link" class="btn">Скопировать tg://ссылку</button>
+            <button id="tg-btn-dir" class="btn">Папка и логи</button>
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <div class="card-title">Интеграция</div>
+          <div class="note muted">MTProto-прокси из официальных релизов
+            Flowseal/tg-ws-proxy: трафик Telegram уходит в DC по
+            WebSocket/TLS, сторонние серверы не нужны. «Telegram-домены»
+            добавляет telegram-домены в user-лист zapret (прямой TCP,
+            пока прокси не поднят); «Фикс dc_ip» применяет рецепт
+            README — оставить только DC 4, чтобы грузились фото/видео
+            у аккаунтов без Premium.</div>
+          <div class="btn-row">
+            <button id="tg-btn-zapret" class="btn">Telegram-домены: …</button>
+            <button id="tg-btn-dc" class="btn">Фикс dc_ip</button>
+            <button id="tg-btn-autostart" class="btn">Автозапуск: …</button>
+          </div>
+          <div id="tg-note" class="note muted"></div>
+        </div>
+      </div>
     </div>
   </section>
 

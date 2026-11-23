@@ -1372,6 +1372,148 @@ async function init() {
   }
 }
 
+/* ── TgWsProxy: вкладка Telegram ─────────────────────────────────────
+ * Карточка читает state.tg (событие state приходит каждые 5 с) и зовёт
+ * api().tg_*; мутации проходят через oplock на стороне Python. */
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const api = () => window.pywebview.api;
+  let T = null;
+
+  function renderTg(tg) {
+    if (!tg) return;
+    T = tg;
+    const dot = $("#tg-dot");
+    if (!tg.installed) {
+      dot.className = "big-dot unknown";
+      $("#tg-headline").textContent = "не установлено";
+      $("#tg-sub").textContent = "официальный релиз с проверкой sha256";
+    } else if (tg.running) {
+      dot.className = tg.listening === false ? "big-dot warn" : "big-dot ok";
+      $("#tg-headline").textContent =
+        tg.listening === false ? "запущен, но порт молчит" : "работает";
+      $("#tg-sub").textContent = tg.host + ":" + tg.port +
+        (tg.listening === false ? "" : " принимает соединения");
+    } else {
+      dot.className = "big-dot warn";
+      $("#tg-headline").textContent = "установлено, не запущено";
+      $("#tg-sub").textContent = tg.host + ":" + tg.port;
+    }
+    $("#tg-tag").textContent = tg.tag || "—";
+    $("#tg-addr").textContent = tg.host + ":" + tg.port +
+      (tg.link ? " · ссылка готова" : " · секрета нет");
+    $("#tg-auto").textContent = tg.autostart ? "вкл" : "выкл";
+    $("#tg-zlist").textContent = tg.zapret_list ? "добавлены" : "не добавлены";
+    $("#tg-btn-autostart").textContent =
+      "Автозапуск: " + (tg.autostart ? "вкл" : "выкл");
+    $("#tg-btn-zapret").textContent =
+      "Telegram-домены: " + (tg.zapret_list ? "вкл" : "выкл");
+    $("#tg-btn-start").disabled = !tg.installed || tg.running;
+    $("#tg-btn-stop").disabled = !tg.running;
+    $("#tg-btn-link").disabled = !tg.link;
+    $("#tg-status").textContent = tg.installed
+      ? (tg.running ? "онлайн" : "офлайн") : "";
+    const notes = [];
+    if (tg.foreign && tg.foreign.length) {
+      notes.push("чужая копия процесса: " + tg.foreign.join(", "));
+    }
+    if (!tg.config_found) {
+      notes.push("конфиг не найден — запустите прокси один раз");
+    }
+    $("#tg-note").textContent = notes.join(" · ");
+  }
+
+  async function tgCall(name, ...args) {
+    try {
+      const res = await api()[name](...args);
+      if (!res || !res.ok) {
+        toast("TgWsProxy: " + ((res && res.error) || "не удалось"), "err");
+      }
+      return res;
+    } catch (e) {
+      toast("TgWsProxy: " + e, "err");
+      return null;
+    }
+  }
+  async function tgRefresh() {
+    const res = await tgCall("tg_state");
+    if (res && res.tg) renderTg(res.tg);
+  }
+
+  $("#tg-btn-install").onclick = async () => {
+    setBusy(true, "устанавливаю TgWsProxy…");
+    try {
+      const res = await tgCall("tg_install");
+      if (res && res.ok) {
+        toast("TgWsProxy " + (res.updated ? "обновлён" : "установлен") +
+              ": " + res.tag, "ok");
+      }
+      await tgRefresh();
+    } finally {
+      setBusy(false, "готов");
+      await refreshState();
+    }
+  };
+  $("#tg-btn-check").onclick = async () => {
+    const res = await tgCall("tg_check_update");
+    if (res && res.ok) {
+      if (res.update_available) {
+        toast("Доступна версия " + res.latest +
+              " (стоит " + (res.current || "нет") + ")");
+      } else {
+        toast("Установлена последняя версия (" +
+              (res.current || "?") + ")", "ok");
+      }
+    }
+  };
+  $("#tg-btn-start").onclick = async () => {
+    await tgCall("tg_start");
+    await tgRefresh();
+  };
+  $("#tg-btn-stop").onclick = async () => {
+    await tgCall("tg_stop");
+    await tgRefresh();
+  };
+  $("#tg-btn-link").onclick = async () => {
+    const res = await tgCall("tg_link");
+    if (!res || !res.ok) return;
+    try {
+      await navigator.clipboard.writeText(res.link);
+      toast("Ссылка скопирована — вставьте в «Избранное» Telegram", "ok");
+    } catch {
+      window.prompt("Скопируйте ссылку:", res.link);
+    }
+  };
+  $("#tg-btn-dir").onclick = () => tgCall("tg_open_dir");
+  $("#tg-btn-autostart").onclick = async () => {
+    const res = await tgCall("tg_autostart", !(T && T.autostart));
+    if (res && res.ok) await tgRefresh();
+  };
+  $("#tg-btn-dc").onclick = async () => {
+    const res = await tgCall("tg_fix_dc");
+    if (res && res.ok) {
+      toast(res.changed ? "dc_ip исправлен (оставлен DC 4)"
+                        : "dc_ip уже в норме", "ok");
+    }
+    await tgRefresh();
+  };
+  $("#tg-btn-zapret").onclick = async () => {
+    setBusy(true, "обновляю список zapret…");
+    try {
+      await tgCall("tg_zapret_list", !(T && T.zapret_list));
+      await tgRefresh();
+    } finally {
+      setBusy(false, "готов");
+      await refreshState();
+    }
+  };
+
+  window.diaspas.on("state", (st) => {
+    if (st && st.tg) renderTg(st.tg);
+  });
+  tgRefresh();
+})();
+
 async function warmupPrivileges() {
   // Единственный UAC за весь срок: задача планировщика регистрируется
   // при старте, а не посреди операции - иначе окно Windows легко
