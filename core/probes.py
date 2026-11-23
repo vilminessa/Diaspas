@@ -42,6 +42,11 @@ PROBE_GROUPS: dict[str, tuple[tuple[str, str], ...]] = {
         ("connect", "https://connect.ubisoft.com/"),
         ("services", "https://public-ubiservices.ubi.com/"),
     ),
+    "telegram": (
+        ("api", "https://api.telegram.org/"),
+        ("web", "https://web.telegram.org/"),
+        ("img", "https://telegra.ph/"),
+    ),
 }
 
 

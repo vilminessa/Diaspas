@@ -206,8 +206,7 @@ def _cache_key(install: str) -> str:
         return str(install)
 
 
-def load_best(install: str) -> str | None:
-    """Лучшая стратегия, подобранная для этой установки ранее."""
+def _entry(install: str) -> dict | None:
     try:
         data = json.loads(_best_cache_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -217,11 +216,39 @@ def load_best(install: str) -> str | None:
     key = _cache_key(install)
     entry = data.get(key)
     if entry is None:
-        entry = data.get(str(install))    # наследие: ключом был путь
-    if isinstance(entry, dict):
-        name = entry.get("strategy")
-        return str(name) if name else None
-    return None
+        entry = data.get(str(install))        # наследие: ключом был путь
+    return entry if isinstance(entry, dict) else None
+
+
+def load_best(install: str, max_age: float | None = None) -> str | None:
+    """Лучшая стратегия, подобранная для этой установки ранее.
+
+    max_age (секунды) - TTL: подбор был час назад, а с тех пор DPI мог
+    измениться, сеть могла смениться. UI подсказывает stale-результат с
+    пометкой «подобран давно», а не выдаёт его за свежий.
+    """
+    entry = _entry(install)
+    if not entry:
+        return None
+    name = entry.get("strategy")
+    if not name:
+        return None
+    if max_age is not None:
+        checked = int(entry.get("checked") or 0)
+        if checked and (time.time() - checked) > max_age:
+            return None
+    return str(name)
+
+
+def best_age(install: str) -> float | None:
+    """Сколько секунд назад был подбор; None - кэша нет."""
+    entry = _entry(install)
+    if not entry:
+        return None
+    checked = int(entry.get("checked") or 0)
+    if not checked:
+        return None
+    return max(0.0, time.time() - checked)
 
 
 def save_best(install: str, strategy: str) -> None:
@@ -386,10 +413,20 @@ def run(root, strategies: list[str] | None = None, log=None,
 
     data = _wait_result(work, token, wait, log=log,
                         on_progress=on_progress, restore=was_running)
-    # лучшая стратегия запоминается для ЭТОЙ установки: при переключении
-    # версии подбор не подмешает чужой результат
-    if data and data.get("ok") and data.get("best"):
-        save_best(str(root), str(data["best"]))
+    if data and data.get("ok"):
+        # Помощник отдаёт «первая подошедшая»: порядок файлов в папке к
+        # качеству не относится. Итог пересчитывается по замерам -
+        # число ответивших целей, затем средний отклик.
+        recomputed = pick_best(data)
+        if recomputed and recomputed != data.get("best"):
+            if log:
+                log("info", f"перебор: лучшая пересчитана "
+                            f"{data.get('best')!r} → {recomputed!r}")
+            data["best"] = recomputed
+        # лучшая стратегия запоминается для ЭТОЙ установки: при переключении
+        # версии подбор не подмешает чужой результат
+        if data.get("best"):
+            save_best(str(root), str(data["best"]))
     return data
 
 
@@ -448,6 +485,43 @@ def _read(path: Path):
         return None
 
 
+def avg_ms(row: dict) -> float:
+    """Средний отклик по целям строки (0, если замеров нет)."""
+    values = [int(t.get("ms") or 0) for t in (row.get("targets") or [])
+              if t.get("ok")]
+    return round(sum(values) / len(values), 1) if values else 0.0
+
+
+def pick_best(result: dict) -> str | None:
+    """Лучшая стратегия по факту замеров, а не «первая подошедшая».
+
+    Помощник перебора возвращает первую стратегию с full - порядок
+    файлов в папке к качеству не относится. Здесь критерии: сначала
+    число ответивших целей (partial лучше, чем ничего), затем средний
+    отклик: две рабочие стратегии различаются тем, сколько секунд
+    пользователь ждёт рукопожатие.
+    """
+    rows = [r for r in (result.get("results") or [])
+            if isinstance(r, dict) and r.get("name")]
+    if not rows:
+        return result.get("best") or None
+    def key(row):
+        return (-int(row.get("count") or 0),
+                avg_ms(row) if avg_ms(row) > 0 else 10 ** 9,
+                str(row.get("name")))
+    best = min(rows, key=key)
+    if int(best.get("count") or 0) == 0:
+        return None
+    return str(best.get("name"))
+
+
+def failed_names(result: dict) -> list[str]:
+    """Стратегии, которые не дали полного обхода - для повторного перебора."""
+    return [str(row.get("name")) for row in (result.get("results") or [])
+            if isinstance(row, dict) and row.get("name")
+            and row.get("state") != "full"]
+
+
 def summarize(result: dict, root) -> list[dict]:
     """Строки для таблицы: имя, метка, состояние, счёт, цели группами."""
     from .paths import strategy_label as _lbl
@@ -467,6 +541,7 @@ def summarize(result: dict, root) -> list[dict]:
             "state": row.get("state"),
             "count": int(row.get("count") or 0),
             "total": int(row.get("total") or 0),
+            "ms": avg_ms(row),
             "groups": groups,
             "best": row.get("name") == result.get("best"),
         })

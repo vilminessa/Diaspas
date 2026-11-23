@@ -29,7 +29,7 @@ from dataclasses import replace
 
 from core import abtest, autoselect, history, installs, log as dlog, oplock, paths
 from core import presets as presets_mod
-from core import probes, release, service, strategies as strategies_mod
+from core import probes, release, service, strategies as strategies_mod, tgproxy
 from i18n import tr
 from ui.bundle import INDEX_HTML
 
@@ -90,6 +90,8 @@ class App:
             self.log("info", f"настройки обновлены: {change}")
         self.last_probes: dict | None = None
         self._select_running = False
+        # итог последнего перебора: база для «повторить проваленные»
+        self._select_last: dict | None = None
         # один warning о пропавшей службе на сессию - без спама в журнал
         self._warned_missing_service = False
         # таймер background-обновления состояния (5 сек)
@@ -265,6 +267,9 @@ class App:
                                   and self.zapret_root is not None),
             "zapret_dir": str(self.zapret_root) if self.zapret_root else None,
             "release_note": settings.get("zapret_release") or "",
+            # TgWsProxy: дешёвый срез (без проб порта) - карточка
+            # «Telegram» перерисовывается тем же событием state
+            "tg": tgproxy.state(quick=True),
         }
 
     def set_install(self, path, source: str = "settings") -> None:
@@ -396,10 +401,16 @@ class App:
         current = presets_mod.current_strategy_file(root, st)
         chosen = strategies_mod.describe(root, name)
         baseline = strategies_mod.describe(root, current) if current else None
+        best = autoselect.load_best(str(root)) or ""
+        age = autoselect.best_age(str(root))
         return {"ok": True, "detail": chosen,
                 "diff": strategies_mod.diff(baseline, chosen),
                 "current": current or "",
-                "best": autoselect.load_best(str(root)) or ""}
+                "best": best,
+                "best_age": int(age) if age is not None else None,
+                # подбор был больше трёх часов назад: показываем это, а не
+                # выдаём старый результат за свежий
+                "best_stale": bool(best and (age or 0) > 3 * 3600)}
 
     def try_strategy(self, key: str, strategy: str = "") -> dict:
         """«Попробовать без применения»: поставить, проверить пробами, вернуть.
@@ -868,11 +879,27 @@ class App:
             self.log("info", f"A/B вывод: {res.get('verdict')}")
         return res
 
-    def select_run(self) -> dict:
+    def select_run(self, strategies=None, failed_only: bool = False) -> dict:
+        """Перебор стратегий. failed_only - только не давшие полного обхода.
+
+        Полный перебор пересоздаёт службу на каждую стратегию и длится
+        долго; повторить имеет смысл именно проваленные, если обход
+        сломался после смены сети/провайдера.
+        """
         if self._select_running:
             return {"ok": False, "error": "перебор уже идёт"}
         if self.zapret_root is None:
             return {"ok": False, "error": tr("err.no_dir")}
+        names: list[str] | None = None
+        if failed_only:
+            names = autoselect.failed_names(self._select_last or {})
+            if not names:
+                return {"ok": False,
+                        "error": "проваленных стратегий нет - полный перебор не нужен"}
+            self.log("info", f"автоподбор: повтор {len(names)} проваленных")
+        elif strategies:
+            names = [str(s) for s in strategies]
+
         self._select_running = True
         try:
             self.log("info", "автоподбор: старт")
@@ -880,12 +907,13 @@ class App:
             def on_progress(data: dict) -> None:
                 self.emitter.emit("select_progress", data)
 
-            res = autoselect.run(self.zapret_root, log=self.log,
+            res = autoselect.run(self.zapret_root, strategies=names, log=self.log,
                                  on_progress=on_progress, wait=900)
             if res is None:
                 return {"ok": False, "error": tr("err.no_uac")}
             if not res.get("ok"):
                 return {"ok": False, "error": str(res.get("error"))}
+            self._select_last = res      # база для «перебрать проваленные»
             # итог уже ушёл прогрессом, но дублируем финальным событием
             self.emitter.emit("select_progress",
                               {"done": res.get("done"),
@@ -1039,6 +1067,121 @@ class App:
             self.log("error", f"открыть журнал: {exc}")
             return {"ok": False, "error": str(exc)}
 
+    # -- TgWsProxy: локальный MTProto-прокси Telegram ------------------------
+
+    def tg_state(self) -> dict:
+        """Полный срез: процесс, порт, ссылка, чужие копии."""
+        return {"ok": True, "tg": tgproxy.state()}
+
+    def tg_check_update(self) -> dict:
+        """Свежий релиз Flowseal/tg-ws-proxy против установленного."""
+        try:
+            info = tgproxy.latest()
+        except release.ReleaseError as exc:
+            return {"ok": False, "error": str(exc)}
+        current = tgproxy.installed_tag()
+        return {"ok": True, "current": current, "latest": info["tag"],
+                "update_available": bool(current != info["tag"])}
+
+    def tg_install(self) -> dict:
+        """Скачать/обновить официальный exe (sha256 сверяется с GitHub API)."""
+
+        def progress(done: int, total: int | None) -> None:
+            if total:
+                self.emitter.emit("toast", {
+                    "text": f"TgWsProxy: {done * 100 // total}%"})
+
+        self.log("info", "TgWsProxy: скачиваю последний релиз")
+        res = tgproxy.install(progress=progress)
+        if not res.get("ok"):
+            self.log("error", f"TgWsProxy: {res.get('error')}")
+            return res
+        verb = "обновлён" if res.get("updated") else "установлен"
+        self.log("info", f"TgWsProxy {verb}: {res.get('tag')}")
+        self.emitter.emit("state", self.state())
+        return res
+
+    def tg_start(self) -> dict:
+        res = tgproxy.start()
+        if not res.get("ok"):
+            self.log("error", f"TgWsProxy: {res.get('error')}")
+            return res
+        self.log("info", "TgWsProxy запущен"
+                 + (" (уже работал)" if res.get("already") else ""))
+        self.emitter.emit("state", self.state())
+        return res
+
+    def tg_stop(self) -> dict:
+        res = tgproxy.stop()
+        if not res.get("ok"):
+            self.log("error", f"TgWsProxy: не остановился ({res})")
+            return res
+        self.log("info", f"TgWsProxy остановлен (снято процессов: "
+                         f"{res.get('stopped', 0)})")
+        self.emitter.emit("state", self.state())
+        return res
+
+    def tg_autostart(self, enable: bool) -> dict:
+        res = tgproxy.set_autostart(bool(enable))
+        if res.get("ok"):
+            self.log("info", "автозапуск TgWsProxy: "
+                     + ("включён" if enable else "выключен"))
+            self.emitter.emit("state", self.state())
+        else:
+            self.log("error", f"автозапуск TgWsProxy: {res.get('error')}")
+        return res
+
+    def tg_link(self) -> dict:
+        link = tgproxy.proxy_link()
+        if not link:
+            return {"ok": False,
+                    "error": "в конфиге нет секрета - запустите прокси "
+                             "и подключитесь из трея вручную"}
+        return {"ok": True, "link": link}
+
+    def tg_open_dir(self) -> dict:
+        """Открыть %APPDATA%\\TgWsProxy (конфиг и логи прокси)."""
+        try:
+            os.startfile(tgproxy.config_dir())  # noqa: S606 - как open_log
+            return {"ok": True}
+        except OSError as exc:
+            self.log("error", f"открыть папку прокси: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+    def tg_zapret_list(self, enable: bool) -> dict:
+        """Telegram-домены в user-листе zapret (+перезапуск службы)."""
+        res = tgproxy.set_zapret_list(bool(enable))
+        if not res.get("ok"):
+            self.log("error", f"список Telegram: {res.get('error')}")
+            return res
+        if res.get("changed"):
+            self.log("info", "telegram-домены в user-листе zapret: "
+                     + ("добавлены" if enable else "убраны"))
+            st = service.state()
+            if st.running:
+                self.log("info", "перезапуск службы для применения списка")
+                service.stop(log=self.log)
+                service.start(log=self.log)
+                st = service.state()
+                if not st.running:
+                    self.log("error",
+                             "служба не перезапустилась после правки списка")
+                    res = {"ok": False, "error": "служба не перезапустилась"}
+        self.emitter.emit("state", self.state())
+        return res
+
+    def tg_fix_dc(self) -> dict:
+        """README-фикс dc_ip: оставить только DC 4 (фото/видео в TG)."""
+        res = tgproxy.fix_dc_ip()
+        if not res.get("ok"):
+            self.log("error", f"dc_ip: {res.get('error')}")
+            return res
+        if res.get("changed"):
+            self.log("info", f"dc_ip исправлен: {res.get('was')} -> "
+                             f"{res.get('dc_ip')}")
+            self.emitter.emit("state", self.state())
+        return res
+
     def stop(self) -> None:
         """Погасить фоновый опрос состояния (поток-демон завершится сам)."""
         self._running = False
@@ -1130,6 +1273,17 @@ def run() -> int:
     api.install_release = op("скачивание релиза")(guard(app.install_release))
     api.ab_run = op("A/B-тест")(guard(app.ab_run))
     api.select_run = op("перебор стратегий")(guard(app.select_run))
+    # TgWsProxy: чтение/ссылка/автозапуск - без блокировки, мутации - по одной
+    api.tg_state = guard(app.tg_state)
+    api.tg_check_update = guard(app.tg_check_update)
+    api.tg_autostart = guard(app.tg_autostart)
+    api.tg_link = guard(app.tg_link)
+    api.tg_open_dir = guard(app.tg_open_dir)
+    api.tg_install = op("установка TgWsProxy")(guard(app.tg_install))
+    api.tg_start = op("старт TgWsProxy")(guard(app.tg_start))
+    api.tg_stop = op("остановка TgWsProxy")(guard(app.tg_stop))
+    api.tg_zapret_list = op("список Telegram для zapret")(guard(app.tg_zapret_list))
+    api.tg_fix_dc = op("фикс dc_ip TgWsProxy")(guard(app.tg_fix_dc))
 
     win = webview.create_window(
         title="Diaspas (διάσπασις)",
