@@ -120,6 +120,7 @@ $Targets = @(
     @{ g = "discord"; n = "web";   u = "https://discord.com/" },
     @{ g = "discord"; n = "api";   u = "https://discord.com/api/gateway" },
     @{ g = "youtube"; n = "web";   u = "https://www.youtube.com/" },
+    @{ g = "youtube"; n = "media"; u = "https://redirector.googlevideo.com/videoplayback" },
     @{ g = "ea";      n = "acc";   u = "https://accounts.ea.com/" },
     @{ g = "ea";      n = "id";    u = "https://signin.ea.com/p/ui/identity" },
     @{ g = "ubisoft"; n = "acct";  u = "https://account.ubisoft.com/" }
