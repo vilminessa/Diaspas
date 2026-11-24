@@ -39,7 +39,7 @@ def test_index_has_required_structure():
         'id="strategy-select"',
         'id="btn-apply-strategy"',
         'id="auto-strategy"',
-        'id="btn-select-apply"',
+        'id="btn-take-best"',
         # подпись сборки в статус-баре
         'id="app-version"',
         # трей: чекбокс включённости и кнопка скрытия окна (без них UI не

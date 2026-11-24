@@ -7,9 +7,12 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from _guard import require_live  # noqa: E402
 
-from core import presets as pm, service  # noqa: E402
+require_live(__doc__ or 'эти прогоны')
+
+
 from ui.webapp import App  # noqa: E402
 
 

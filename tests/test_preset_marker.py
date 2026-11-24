@@ -152,10 +152,67 @@ def test_successful_apply_writes_marker(tmp_path, isolated_settings,
     root = make_root(tmp_path)
     monkeypatch.setattr(pm.service, "install_strategy",
                         lambda *a, **k: {"ok": True, "state": {}})
+    # apply ждёт ФАКТИЧЕСКОГО старта службы: без running=True это провал
+    running = pm.service.ServiceState(
+        installed=True, running=True, start_type="Automatic",
+        strategy="general (ALT11)", pid=7, binpath="")
+    monkeypatch.setattr(pm.service, "state", lambda log=None: running)
     ubisoft = next(p for p in DEFAULT_PRESETS if p.key == "ubisoft")
     res = pm.apply(ubisoft, root)
     assert res["ok"]
     assert pm.active_preset_key() == "ubisoft"
+
+
+def test_successful_apply_clears_last_known_preset(tmp_path,
+                                                   isolated_settings,
+                                                   monkeypatch):
+    """Успешное применение снимает дрейф: last_known_preset сбрасывается."""
+    root = make_root(tmp_path)
+    monkeypatch.setattr(pm.service, "install_strategy",
+                        lambda *a, **k: {"ok": True, "state": {}})
+    running = pm.service.ServiceState(
+        installed=True, running=True, start_type="Automatic",
+        strategy="general (ALT11)", pid=7, binpath="")
+    monkeypatch.setattr(pm.service, "state", lambda log=None: running)
+    settings = paths.read_settings()
+    settings["last_known_preset"] = "apex_ea"
+    paths.write_settings(settings)
+
+    ubisoft = next(p for p in DEFAULT_PRESETS if p.key == "ubisoft")
+    res = pm.apply(ubisoft, root)
+    assert res["ok"]
+    assert pm.active_preset_key() == "ubisoft"
+    assert paths.read_settings().get("last_known_preset") is None
+
+
+def test_last_known_preset_key_reads_settings(tmp_path, isolated_settings):
+    """last_known_preset_key читает сохранённый при дрейфе пресет."""
+    assert pm.last_known_preset_key() is None
+    settings = paths.read_settings()
+    settings["last_known_preset"] = "ubisoft"
+    paths.write_settings(settings)
+    assert pm.last_known_preset_key() == "ubisoft"
+
+
+def test_apply_fails_when_winws_dies(tmp_path, isolated_settings,
+                                     monkeypatch):
+    """Служба установлена, но winws упал (1067) -> ok=False с кодом.
+
+    Регрессия «обход не запускается»: раньше install(ok) = успех, и UI
+    молча показывал «применён» при мёртвом winws.
+    """
+    root = make_root(tmp_path)
+    monkeypatch.setattr(pm.service, "install_strategy",
+                        lambda *a, **k: {"ok": True, "state": {}})
+    dead = pm.service.ServiceState(
+        installed=True, running=False, start_type="Automatic",
+        strategy="general (ALT11)", pid=0, binpath="", exit_code=1067)
+    monkeypatch.setattr(pm.service, "state", lambda log=None: dead)
+    apex = next(p for p in DEFAULT_PRESETS if p.key == "apex_ea")
+    res = pm.apply(apex, root)
+    assert not res["ok"]
+    assert "1067" in res["error"], res["error"]
+    assert "winws" in res["error"]
 
 
 def test_merge_domains_no_duplicate_header(tmp_path):

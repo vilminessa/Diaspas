@@ -4,10 +4,14 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from _guard import require_live
+
+ROOT = Path(__file__).resolve().parents[2]
 LOG = Path.home() / "AppData/Local/Diaspas/diaspas.log"
 sys.path.insert(0, str(ROOT / "tests"))
 from _console import decode  # noqa: E402 - вывод PowerShell в OEM-кодовке
+
+require_live(__doc__ or "прогон webview-окна")
 
 FIND_WINDOW = r'''
 Add-Type @"

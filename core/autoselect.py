@@ -1,4 +1,8 @@
-"""Автоподбор рабочей стратегии: перебор general*.bat одной повышенной сессией.
+"""Автоподбор рабочей стратегии: перебор стратегий одной повышенной сессией.
+
+Стратегии берутся из установки как есть: ``general*.bat`` во Flowseal и
+``preset*.cmd`` в win-bundle (см. presets.available_strategies) - перебор
+для winws-layout иначе вообще не запускался.
 
 Идея из service.bat (12. Run Tests) и Synfronia: каждая стратегия
 запускается, прогоняется по целям, результат пишется по ходу - карточка
@@ -18,7 +22,7 @@ import json
 import time
 from pathlib import Path
 
-from . import service
+from . import paths, service
 # -- помощник (PowerShell) -------------------------------------------------
 # Тот же контракт, что у service_runner: request.json -> result-<token>.json,
 # промежуточные итоги - progress-<token>.json.
@@ -191,6 +195,95 @@ def _work_dir() -> Path:
     return d
 
 
+def _best_cache_path() -> Path:
+    """{app}/strategy-cache.json: лучшая стратегия ПО УСТАНОВКЕ.
+
+    Приём Synfronia: версии zapret живут по-своему (1.9.x и 1.10.x
+    различаются набором стратегий), поэтому выбор, сделанный для 1.10.3,
+    нельзя подмешивать 1.10.2. Ключ - стабильный id установки (см.
+    installs.uid_of), а не путь: переименование папки раньше теряло подбор.
+    """
+    return paths.app_dir() / "strategy-cache.json"
+
+
+def _cache_key(install: str) -> str:
+    """Ключ кэша для установки: uid, а для чужих папок - путь."""
+    from . import installs
+    try:
+        return installs.uid_of(str(install))
+    except Exception:  # noqa: BLE001 - кэш не должен рвать перебор
+        return str(install)
+
+
+def _entry(install: str) -> dict | None:
+    try:
+        data = json.loads(_best_cache_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    key = _cache_key(install)
+    entry = data.get(key)
+    if entry is None:
+        entry = data.get(str(install))        # наследие: ключом был путь
+    return entry if isinstance(entry, dict) else None
+
+
+def load_best(install: str, max_age: float | None = None) -> str | None:
+    """Лучшая стратегия, подобранная для этой установки ранее.
+
+    max_age (секунды) - TTL: подбор был час назад, а с тех пор DPI мог
+    измениться, сеть могла смениться. UI подсказывает stale-результат с
+    пометкой «подобран давно», а не выдаёт его за свежий.
+    """
+    entry = _entry(install)
+    if not entry:
+        return None
+    name = entry.get("strategy")
+    if not name:
+        return None
+    if max_age is not None:
+        checked = int(entry.get("checked") or 0)
+        if checked and (time.time() - checked) > max_age:
+            return None
+    return str(name)
+
+
+def best_age(install: str) -> float | None:
+    """Сколько секунд назад был подбор; None - кэша нет."""
+    entry = _entry(install)
+    if not entry:
+        return None
+    checked = int(entry.get("checked") or 0)
+    if not checked:
+        return None
+    return max(0.0, time.time() - checked)
+
+
+def save_best(install: str, strategy: str) -> None:
+    """Запомнить лучшую стратегию для установки (не для всех сразу)."""
+    path = _best_cache_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    key = _cache_key(install)
+    data[key] = {"strategy": str(strategy), "checked": int(time.time())}
+    if key != str(install):
+        # миграция: прежняя запись по пути больше не нужна
+        data.pop(str(install), None)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
 def _write_selector() -> Path:
     path = _work_dir() / "selector.ps1"
     try:
@@ -245,12 +338,20 @@ def run(root, strategies: list[str] | None = None, log=None,
     import os
     import subprocess
 
-    from .paths import strategy_files as _files
-
     root = Path(root)
-    names = strategies if strategies is not None else _files(root)
+    from . import installs
+    from . import presets as presets_mod
+
+    info = installs.detect_layout(root)
+    # стратегии win-bundle лежат рядом с winws.exe, а не в корне релиза:
+    # помощник обязан запускать их из той папки, где они нашлись
+    exec_root = (info["winws_dir"] or root
+                 if info["layout"] == installs.LAYOUT_WINWS else root)
+    names = (strategies if strategies is not None
+             else presets_mod.available_strategies(root))
     if not names:
-        return {"ok": False, "error": "в папке нет general*.bat"}
+        return {"ok": False, "error": "в папке нет стратегий "
+                                      "(general*.bat или preset*.cmd)"}
 
     work = _work_dir()
     runner = _write_selector()
@@ -263,7 +364,7 @@ def run(root, strategies: list[str] | None = None, log=None,
             pass
 
     token = str(int(time.time() * 1000))
-    req = {"action": "select", "token": token, "root": str(root),
+    req = {"action": "select", "token": token, "root": str(exec_root),
            "configs": names, "stop_on_full": bool(stop_on_full)}
     try:
         (work / "request.json").write_text(
@@ -322,8 +423,23 @@ def run(root, strategies: list[str] | None = None, log=None,
     # STOPPED. Запоминаем состояние, чтобы не оставить ПК без обхода.
     was_running = service.state().running
 
-    return _wait_result(work, token, wait, log=log, on_progress=on_progress,
-                        restore=was_running)
+    data = _wait_result(work, token, wait, log=log,
+                        on_progress=on_progress, restore=was_running)
+    if data and data.get("ok"):
+        # Помощник отдаёт «первая подошедшая»: порядок файлов в папке к
+        # качеству не относится. Итог пересчитывается по замерам -
+        # число ответивших целей, затем средний отклик.
+        recomputed = pick_best(data)
+        if recomputed and recomputed != data.get("best"):
+            if log:
+                log("info", f"перебор: лучшая пересчитана "
+                            f"{data.get('best')!r} → {recomputed!r}")
+            data["best"] = recomputed
+        # лучшая стратегия запоминается для ЭТОЙ установки: при переключении
+        # версии подбор не подмешает чужой результат
+        if data.get("best"):
+            save_best(str(root), str(data["best"]))
+    return data
 
 
 def cancel() -> None:
@@ -381,6 +497,43 @@ def _read(path: Path):
         return None
 
 
+def avg_ms(row: dict) -> float:
+    """Средний отклик по целям строки (0, если замеров нет)."""
+    values = [int(t.get("ms") or 0) for t in (row.get("targets") or [])
+              if t.get("ok")]
+    return round(sum(values) / len(values), 1) if values else 0.0
+
+
+def pick_best(result: dict) -> str | None:
+    """Лучшая стратегия по факту замеров, а не «первая подошедшая».
+
+    Помощник перебора возвращает первую стратегию с full - порядок
+    файлов в папке к качеству не относится. Здесь критерии: сначала
+    число ответивших целей (partial лучше, чем ничего), затем средний
+    отклик: две рабочие стратегии различаются тем, сколько секунд
+    пользователь ждёт рукопожатие.
+    """
+    rows = [r for r in (result.get("results") or [])
+            if isinstance(r, dict) and r.get("name")]
+    if not rows:
+        return result.get("best") or None
+    def key(row):
+        return (-int(row.get("count") or 0),
+                avg_ms(row) if avg_ms(row) > 0 else 10 ** 9,
+                str(row.get("name")))
+    best = min(rows, key=key)
+    if int(best.get("count") or 0) == 0:
+        return None
+    return str(best.get("name"))
+
+
+def failed_names(result: dict) -> list[str]:
+    """Стратегии, которые не дали полного обхода - для повторного перебора."""
+    return [str(row.get("name")) for row in (result.get("results") or [])
+            if isinstance(row, dict) and row.get("name")
+            and row.get("state") != "full"]
+
+
 def summarize(result: dict, root) -> list[dict]:
     """Строки для таблицы: имя, метка, состояние, счёт, цели группами."""
     from .paths import strategy_label as _lbl
@@ -400,6 +553,7 @@ def summarize(result: dict, root) -> list[dict]:
             "state": row.get("state"),
             "count": int(row.get("count") or 0),
             "total": int(row.get("total") or 0),
+            "ms": avg_ms(row),
             "groups": groups,
             "best": row.get("name") == result.get("best"),
         })

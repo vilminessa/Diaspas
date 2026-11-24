@@ -108,13 +108,13 @@ def test_download_detects_truncation(tmp_path, monkeypatch):
     fake = _FakeResponse(b"x" * 100, {"Content-Length": "1000"})
     monkeypatch.setattr(release, "urlopen", lambda *a, **k: fake)
 
-    rel = release.Release(tag="v1", name="v1", zip_url="http://x/v1.zip",
+    rel = release.Release(repo=release.REPO_FLOWSEAL, tag="v1", name="v1", zip_url="http://x/v1.zip",
                           published="")
     with pytest.raises(release.ReleaseError, match="оборвано"):
         release.download(rel)
     # недокачанный .part удалён
     assert not list(tmp_path.glob("*.part"))
-    assert not (tmp_path / "zapret-v1.zip").exists()
+    assert not (tmp_path / "zapret-zapret-discord-youtube-v1.zip").exists()
 
 
 def test_download_rejects_non_zip(tmp_path, monkeypatch):
@@ -124,17 +124,17 @@ def test_download_rejects_non_zip(tmp_path, monkeypatch):
     fake = _FakeResponse(body, {"Content-Length": str(len(body))})
     monkeypatch.setattr(release, "urlopen", lambda *a, **k: fake)
 
-    rel = release.Release(tag="v2", name="v2", zip_url="http://x/v2.zip",
+    rel = release.Release(repo=release.REPO_FLOWSEAL, tag="v2", name="v2", zip_url="http://x/v2.zip",
                           published="")
     with pytest.raises(release.ReleaseError, match="не является zip"):
         release.download(rel)
-    assert not (tmp_path / "zapret-v2.zip").exists()
+    assert not (tmp_path / "zapret-zapret-discord-youtube-v2.zip").exists()
 
 
 def test_download_reuses_valid_cache(tmp_path, monkeypatch):
     """Валидный кэш не перекачивается (urlopen не должен вызываться)."""
     monkeypatch.setattr(release.paths, "cache_dir", lambda: tmp_path)
-    cached = tmp_path / "zapret-v3.zip"
+    cached = tmp_path / "zapret-zapret-discord-youtube-v3.zip"
     with zipfile.ZipFile(cached, "w") as zf:
         zf.writestr("a/service.bat", "x")
 
@@ -142,7 +142,7 @@ def test_download_reuses_valid_cache(tmp_path, monkeypatch):
         raise AssertionError("urlopen вызван при валидном кэше")
 
     monkeypatch.setattr(release, "urlopen", boom)
-    rel = release.Release(tag="v3", name="v3", zip_url="http://x/v3.zip",
+    rel = release.Release(repo=release.REPO_FLOWSEAL, tag="v3", name="v3", zip_url="http://x/v3.zip",
                           published="")
     result = release.download(rel)
     assert result == cached
@@ -151,7 +151,7 @@ def test_download_reuses_valid_cache(tmp_path, monkeypatch):
 def test_download_recovers_corrupt_cache(tmp_path, monkeypatch):
     """Битый кэш прошлой попытки -> перекачка, а не переиспользование."""
     monkeypatch.setattr(release.paths, "cache_dir", lambda: tmp_path)
-    cached = tmp_path / "zapret-v4.zip"
+    cached = tmp_path / "zapret-zapret-discord-youtube-v4.zip"
     cached.write_bytes(b"garbage not a zip")
 
     buf = io.BytesIO()
@@ -162,7 +162,7 @@ def test_download_recovers_corrupt_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(release, "urlopen",
                         lambda *a, **k: _FakeResponse(
                             body, {"Content-Length": str(len(body))}))
-    rel = release.Release(tag="v4", name="v4", zip_url="http://x/v4.zip",
+    rel = release.Release(repo=release.REPO_FLOWSEAL, tag="v4", name="v4", zip_url="http://x/v4.zip",
                           published="")
     result = release.download(rel)
     assert zipfile.is_zipfile(result)

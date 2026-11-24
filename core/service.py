@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import paths
+from i18n import tr
 
 TASK_NAME = "DiaspasService"
 RUNNER_NAME = "service_runner.ps1"
@@ -363,6 +364,10 @@ class ServiceState:
     strategy: str
     pid: int
     binpath: str
+    # WIN32_EXIT_CODE последнего завершения: 1067 = «процесс упал сразу»
+    # - именно так выглядит битый запуск winws, и без этого кода
+    # «служба установлена, но обхода нет» нечем объяснить
+    exit_code: int = 0
 
     @classmethod
     def from_dict(cls, data: dict) -> "ServiceState":
@@ -373,6 +378,7 @@ class ServiceState:
             strategy=str(data.get("strategy") or ""),
             pid=int(data.get("pid") or 0),
             binpath=str(data.get("binpath") or ""),
+            exit_code=int(data.get("exit_code") or 0),
         )
 
 
@@ -388,12 +394,18 @@ def state(log=None) -> ServiceState:
 
 def _state_local() -> ServiceState:
     """Состояние без повышения прав - хватает для отображения в GUI."""
+    running = installed = False
+    exit_code = 0
     try:
         out = subprocess.run(["sc", "query", "zapret"],
                              capture_output=True, timeout=15)
         text = (out.stdout or b"").decode("cp1251", "replace")
         running = "RUNNING" in text
         installed = out.returncode == 0
+        import re
+        m = re.search(r"WIN32_EXIT_CODE\s*:\s*(\d+)", text)
+        if m:
+            exit_code = int(m.group(1))
     except (OSError, subprocess.SubprocessError):
         running = installed = False
 
@@ -424,7 +436,8 @@ def _state_local() -> ServiceState:
 
     return ServiceState(installed=installed, running=running,
                         start_type=start_type, strategy=label,
-                        pid=_winws_pid(), binpath=binpath)
+                        pid=_winws_pid(), binpath=binpath,
+                        exit_code=exit_code)
 
 
 def _winws_pid() -> int:
@@ -477,19 +490,19 @@ def install_strategy(binpath: str, strategy_label: str,
     return run_action("install", {"binpath": normalized,
                                   "strategy": strategy_label,
                                   "exe": exe},
-                      wait=90, log=log) or {"ok": False, "error": "нет прав"}
+                      wait=90, log=log) or {"ok": False, "error": tr("err.no_uac")}
 
 
 def start(log=None) -> dict:
     return run_action("start", wait=45, log=log) or {"ok": False,
-                                                     "error": "нет прав"}
+                                                     "error": tr("err.no_uac")}
 
 
 def stop(log=None) -> dict:
     return run_action("stop", wait=60, log=log) or {"ok": False,
-                                                    "error": "нет прав"}
+                                                    "error": tr("err.no_uac")}
 
 
 def remove(log=None) -> dict:
     return run_action("remove", wait=45, log=log) or {"ok": False,
-                                                      "error": "нет прав"}
+                                                      "error": tr("err.no_uac")}
