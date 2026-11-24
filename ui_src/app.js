@@ -166,27 +166,50 @@ function renderState(st) {
   renderStrategy(st);
   renderTray(st);
 
-  // кнопка «Создать службу»: папка есть, а службы нет
-  const need = st.dir_ok && !st.installed;
-  $("#btn-create-service").classList.toggle("hidden", !need);
-  if (need) {
+  // контекстная CTA: одна primary-кнопка = следующий шаг из состояния.
+  // Раньше здесь жили две отдельные кнопки (создать службу / восстановить)
+  // — они прыгали по экрану; теперь действие одно, а состояние меняет
+  // только его подпись и подсказку.
+  const cta = $("#btn-cta");
+  const next = $("#state-next");
+  let ctaLabel = "", ctaFn = null, hint = "";
+  if (!st.dir_ok) {
+    ctaLabel = "Скачать последний релиз";
+    ctaFn = installRelease;
+    hint = "нет папки zapret — скачай релиз или укажи папку вручную";
+  } else if (!st.installed) {
     const key = st.suggested_preset;
     const name = (S.presets.find((p) => p.key === key) || {}).title;
-    $("#btn-create-service").textContent = name
-      ? `Создать службу — пресет «${name}»` : "Создать службу (выберите пресет)";
-    $("#btn-create-service").onclick = () => createService(key);
-  }
-
-  // кнопка «Восстановить после перезапуска»: служба запущена, но пресет
-  // не распознан - правки вне Diaspas (service.bat) или автозапуск
-  const needRestore = st.needs_restore;
-  if (needRestore) {
-    $("#btn-restore-after-restart").classList.remove("hidden");
-    $("#btn-restore-after-restart").textContent = "Восстановить после перезапуска";
-    $("#btn-restore-after-restart").onclick = () => restoreAfterRestart(st.suggested_preset);
+    ctaLabel = name ? `Создать службу — «${name}»` : "Создать службу";
+    ctaFn = () => createService(key);
+    hint = "папка релиза на месте — осталось создать службу";
+  } else if (st.needs_restore) {
+    ctaLabel = "Восстановить после перезапуска";
+    ctaFn = () => restoreAfterRestart(st.suggested_preset);
+    hint = "служба работает, но пресет не распознан — состояние синхронизируется";
+  } else if (!run) {
+    // служба остановлена: применение пресета пересоздаст её
+    const key = st.preset_key || st.suggested_preset;
+    const p = S.presets.find((x) => x.key === key);
+    if (p && !p.off) {
+      ctaLabel = `Запустить обход — «${p.title}»`;
+      ctaFn = () => applyPreset(p);
+    }
+    hint = "служба остановлена — применение пресета запустит её";
   } else {
-    $("#btn-restore-after-restart").classList.add("hidden");
+    hint = "обход работает — действий не требуется";
   }
+  if (ctaFn) {
+    cta.classList.remove("hidden");
+    cta.textContent = ctaLabel;
+    cta.onclick = ctaFn;
+  } else {
+    cta.classList.add("hidden");
+  }
+  next.textContent = hint;
+  next.classList.remove("hidden");
+
+  $("#v-zver").textContent = st.release_note || "—";
 
   // подсветка активного пресета
   document.querySelectorAll(".preset-card").forEach((c) => {
@@ -278,6 +301,10 @@ function renderTray(st) {
   const btn = $("#btn-hide-window");
   btn.disabled = !st.tray_running || hidden || S.busy;
   btn.textContent = hidden ? "Окно скрыто" : "Скрыть окно";
+
+  // сводка на Обзоре: трей включён/выключен одним словом
+  $("#v-tray").textContent = !st.tray ? "выключен"
+    : (st.tray_running ? "вкл" : "вкл, иконка не поднялась");
 
   $("#tray-note").textContent = st.tray
     ? (st.tray_running
@@ -757,6 +784,9 @@ async function listReleases() {
   let res;
   try {
     res = await api().available_releases();
+  } catch (e) {
+    // без catch любая ошибка молчала: ни тоста, ни таблицы — «кнопка не работает»
+    res = { ok: false, error: String(e) };
   } finally {
     setBusy(false, "готов");
   }
@@ -1549,8 +1579,6 @@ document.addEventListener("DOMContentLoaded", () => {
   // перенос связки «пресет + стратегия + списки»
   $("#btn-export-preset").onclick = exportCurrentPreset;
   $("#btn-import-preset").onclick = importPresetBundle;
-  // восстановление после перезапуска
-  $("#btn-restore-after-restart").onclick = () => restoreAfterRestart();
   // скачивание версий
   $("#btn-list-releases").onclick = listReleases;
   $("#release-repo").onchange = () => renderReleaseTable(currentRepo());

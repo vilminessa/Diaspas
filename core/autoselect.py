@@ -19,10 +19,15 @@ UAC на каждую стратегию был бы невыносим.
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from pathlib import Path
 
 from . import paths, service
+
+# Без CREATE_NO_WINDOW schtasks от GUI-сборки создавал бы
+# мигающее окно консоли при каждом /Query, /End, /Run.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 # -- помощник (PowerShell) -------------------------------------------------
 # Тот же контракт, что у service_runner: request.json -> result-<token>.json,
 # промежуточные итоги - progress-<token>.json.
@@ -315,7 +320,8 @@ def _register() -> bool:
     for _ in range(30):
         try:
             out = subprocess.run([schtasks, "/Query", "/TN", "DiaspasSelector"],
-                                 capture_output=True, timeout=25)
+                                 capture_output=True, timeout=25,
+                                 creationflags=_NO_WINDOW)
             if out.returncode == 0:
                 return True
         except (OSError, subprocess.SubprocessError):
@@ -380,7 +386,8 @@ def run(root, strategies: list[str] | None = None, log=None,
     def task_ok() -> bool:
         try:
             out = subprocess.run([schtasks, "/Query", "/TN", "DiaspasSelector"],
-                                 capture_output=True, timeout=25)
+                                 capture_output=True, timeout=25,
+                                 creationflags=_NO_WINDOW)
             return out.returncode == 0
         except (OSError, subprocess.SubprocessError):
             return False
@@ -406,12 +413,14 @@ def run(root, strategies: list[str] | None = None, log=None,
             return None
     else:
         subprocess.run([schtasks, "/End", "/TN", "DiaspasSelector"],
-                       capture_output=True, timeout=25)
+                       capture_output=True, timeout=25,
+                       creationflags=_NO_WINDOW)
         time.sleep(1.0)
         started = False
         for _ in range(3):
             out = subprocess.run([schtasks, "/Run", "/TN", "DiaspasSelector"],
-                                 capture_output=True, timeout=30)
+                                 capture_output=True, timeout=30,
+                                 creationflags=_NO_WINDOW)
             if out.returncode == 0:
                 started = True
                 break

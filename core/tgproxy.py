@@ -32,6 +32,11 @@ from pathlib import Path
 
 from . import paths, release
 
+# Без CREATE_NO_WINDOW дочерний консольный процесс (tasklist,
+# powershell, taskkill) от GUI-сборки создавал бы мигающее окно:
+# фоновый опрос state() дёргает tasklist каждые 5 секунд.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
 REPO = "Flowseal/tg-ws-proxy"
 ASSET = "TgWsProxy_windows.exe"
 EXE_NAME = "TgWsProxy_windows.exe"
@@ -295,7 +300,8 @@ def _image_pids() -> list[int]:
     try:
         out = subprocess.run(
             ["tasklist", "/FI", f"IMAGENAME eq {IMAGE_NAME}", "/FO", "CSV", "/NH"],
-            capture_output=True, text=True, timeout=15)
+            capture_output=True, text=True, timeout=15,
+            creationflags=_NO_WINDOW)
     except (OSError, subprocess.SubprocessError):
         return []
     pids: list[int] = []
@@ -319,7 +325,8 @@ def _paths_of_pids(pids: list[int]) -> list[str]:
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command", cmd],
-            capture_output=True, text=True, timeout=20)
+            capture_output=True, text=True, timeout=20,
+            creationflags=_NO_WINDOW)
     except (OSError, subprocess.SubprocessError):
         return []
     return [ln.strip() for ln in (out.stdout or "").splitlines() if ln.strip()]
@@ -370,7 +377,8 @@ def stop() -> dict:
     try:
         subprocess.run(
             ["taskkill", "/F", "/IM", IMAGE_NAME],
-            capture_output=True, timeout=20)
+            capture_output=True, timeout=20,
+            creationflags=_NO_WINDOW)
     except (OSError, subprocess.SubprocessError) as exc:
         return {"ok": False, "error": str(exc)}
     time.sleep(0.6)

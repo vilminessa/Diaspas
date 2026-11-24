@@ -119,14 +119,25 @@ html, body {
   padding: var(--gap) 20px;
 }
 .panel { display: none; }
-.panel.active { display: block; }
+/* панель = колонка карточек с единым ритмом отступов;
+   min-height — чтобы «grow»-карточка журнала тянулась на всю высоту */
+.panel.active { display: flex; flex-direction: column; gap: var(--gap); min-height: 100%; }
 .grid-2 {
   display: grid;
-  grid-template-columns: minmax(340px, 1fr) minmax(400px, 1.25fr);
+  grid-template-columns: repeat(2, minmax(340px, 1fr));
   gap: var(--gap);
   align-items: start;
 }
 .col { display: flex; flex-direction: column; gap: var(--gap); }
+
+/* ── строка-файловый ряд (версии, стратегии) ────────────────── */
+.version-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.version-row select { min-width: 210px; }
 
 /* ── карточки ──────────────────────────────────────────────── */
 .card {
@@ -138,7 +149,8 @@ html, body {
   flex-direction: column;
   gap: 12px;
 }
-.card.grow { min-height: 100%; }
+/* в flex-панели карточка журнала занимает всё оставшееся место */
+.card.grow { flex: 1; min-height: 240px; }
 .card-title {
   font-size: 13px;
   font-weight: 600;
@@ -169,6 +181,29 @@ html, body {
 }
 .kv dt { color: var(--muted); font-size: 13px; }
 .kv dd { margin: 0; }
+/* инженерная сводка на Обзоре: 6 пар параметров в 3 колонки —
+   всё состояние читается одним взглядом, без вертикального скролла */
+.kv-3 {
+  grid-template-columns: repeat(3, auto 1fr);
+  gap: 8px 24px;
+  padding: 12px 14px;
+  background: var(--widget);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+}
+.kv-3 dt { font-size: 12.5px; }
+.kv-3 dd { font-size: 13px; }
+
+/* подсказка «следующий шаг»: приложение само говорит, что делать */
+.state-next {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  background: var(--widget);
+  border-radius: var(--radius-s);
+  padding: 9px 13px;
+  font-size: 13.5px;
+  color: var(--text);
+}
 
 /* ── кнопки ────────────────────────────────────────────────── */
 .btn {
@@ -215,7 +250,6 @@ select:focus { outline: none; border-color: var(--accent); }
   gap: 10px;
   align-items: center;
   flex-wrap: wrap;
-  margin-top: 10px;
 }
 .strategy-row select { min-width: 210px; }
 .check {

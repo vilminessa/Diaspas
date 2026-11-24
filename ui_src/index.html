@@ -25,6 +25,8 @@
 <!-- ═══ вкладки ═══ -->
 <nav class="tabs" role="tablist">
   <button class="tab active" data-tab="overview" role="tab">Обзор</button>
+  <button class="tab" data-tab="strategies" role="tab">Стратегии</button>
+  <button class="tab" data-tab="install" role="tab">Установка</button>
   <button class="tab" data-tab="diagnostics" role="tab">Диагностика</button>
   <button class="tab" data-tab="journal" role="tab">Журнал</button>
   <button class="tab" data-tab="tg" role="tab">Telegram</button>
@@ -34,128 +36,197 @@
 
   <!-- ═══ вкладка: обзор ═══ -->
   <section id="tab-overview" class="panel active">
-    <div class="grid-2">
-      <div class="col">
-        <div class="card">
-          <div class="card-title">Состояние</div>
-          <div class="hero">
-            <span id="state-dot" class="big-dot unknown"></span>
-            <div>
-              <div id="state-headline" class="hero-text">проверяю…</div>
-              <div id="state-sub" class="hero-sub muted"></div>
-            </div>
-          </div>
-          <dl class="kv">
-            <dt>Служба</dt><dd id="v-service">—</dd>
-            <dt>Стратегия</dt><dd id="v-strategy">—</dd>
-            <dt>Пресет</dt><dd id="v-preset">—</dd>
-            <dt>Процесс winws</dt><dd id="v-pid" class="mono">—</dd>
-          </dl>
 
-          <!-- версии zapret: несколько установленных, одна активная -->
-          <div class="version-row">
-            <label class="field">версия
-              <select id="version-select"></select>
-            </label>
-            <button id="btn-switch-version" class="btn hidden">Переключить</button>
-            <button id="btn-rollback" class="btn hidden">Откатиться</button>
-            <button id="btn-remove-version" class="btn danger hidden">Удалить выбранную</button>
-          </div>
-          <div class="btn-row">
-            <button id="btn-check-update" class="btn">Проверить обновление</button>
-            <button id="btn-check-install" class="btn">Проверить файлы</button>
-          </div>
-
-          <!-- авто-режим стратегий и трей: чекбоксы живут отдельно от
-               основного селектора стратегий (он ниже, в блоке пресета) -->
-          <div class="strategy-row">
-            <label class="check" title="Подбор при запуске и после проб с сбоями">
-              <input type="checkbox" id="auto-strategy"> авто
-            </label>
-            <label class="check" title="Иконка в трее: меню меняет пресет и стратегию, обход при этом не выключается">
-              <input type="checkbox" id="tray-enabled"> трей
-            </label>
-            <button id="btn-hide-window" class="btn">Скрыть окно</button>
-            <span id="tray-note" class="note muted"></span>
-          </div>
-          <div id="strategy-note" class="note muted"></div>
-          </div>
-
-          <div class="btn-row">
-            <button id="btn-refresh" class="btn">Обновить</button>
-            <button id="btn-pick-dir" class="btn">Указать папку…</button>
-            <button id="btn-install" class="btn primary">Скачать последний релиз</button>
-            <button id="btn-create-service" class="btn primary hidden">Создать службу</button>
-            <button id="btn-restore-after-restart" class="btn primary hidden">Восстановить после перезапуска</button>
-          </div>
-
-          <!-- выбор конкретной стратегии: результат перебора должен
-               применяться, а не только отображаться. Целевой пресет
-               выбирается явно - без него стратегия привязывалась только
-               к маркеру, и служба, поставленная service.bat, не
-               переключалась вовсе -->
-          <div class="version-row">
-            <label class="field">стратегия
-              <select id="strategy-select"></select>
-            </label>
-            <label class="field">для пресета
-              <select id="strategy-preset"></select>
-            </label>
-            <button id="btn-apply-strategy" class="btn hidden">Применить стратегию</button>
-            <button id="btn-save-strategy" class="btn hidden">Запомнить</button>
-            <button id="btn-try-strategy" class="btn hidden">Попробовать без применения</button>
-            <span class="mono muted" id="strategy-current"></span>
-            <span class="mono muted" id="strategy-layout"></span>
-          </div>
-
-          <!-- разбор аргументов winws: выбор стратегии вслепую по имени
-               файла был гаданием, теперь видно что она делает и чем
-               отличается от стоящей -->
-          <div id="strategy-detail" class="note muted hidden"></div>
-
-          <!-- скачивание любой доступной версии из обоих источников -->
-          <div class="btn-row">
-            <label class="field">источник
-              <select id="release-repo"></select>
-            </label>
-            <button id="btn-list-releases" class="btn">Показать версии</button>
-          </div>
-          <div class="table-wrap">
-            <table class="table" id="release-table">
-              <thead><tr><th>Версия</th><th>Дата</th><th>Размер</th>
-                <th></th></tr></thead>
-              <tbody><tr><td colspan="4" class="muted">
-                нажмите «Показать версии» — список придёт с GitHub
-              </td></tr></tbody>
-            </table>
-          </div>
-          <div id="release-note" class="note muted"></div>
-        </div>
-
-        <div class="card">
-          <div class="card-title">Последние пробы</div>
-          <div id="overview-probes" class="chips">—</div>
-          <div class="btn-row">
-            <button id="btn-quick-probe" class="btn">Проверить</button>
-            <button class="btn" data-goto="diagnostics">Диагностика →</button>
-          </div>
+    <!-- статус-центр: что происходит и что делать дальше -->
+    <div class="card">
+      <div class="card-title">Состояние</div>
+      <div class="hero">
+        <span id="state-dot" class="big-dot unknown"></span>
+        <div>
+          <div id="state-headline" class="hero-text">проверяю…</div>
+          <div id="state-sub" class="hero-sub muted"></div>
         </div>
       </div>
 
-      <div class="col">
-        <div class="card">
-          <div class="card-title">Пресеты</div>
-          <div id="preset-grid" class="preset-grid"></div>
-          <div id="preset-hint" class="note muted">Наведите на пресет — появится описание.</div>
-          <!-- перенос связки «пресет + стратегия + списки»: рабочую
-               конфигурацию можно забрать на другую машину -->
-          <div class="btn-row">
-            <button id="btn-export-preset" class="btn">Экспорт текущего</button>
-            <button id="btn-import-preset" class="btn">Импорт связки…</button>
-          </div>
-        </div>
+      <!-- подсказка «следующий шаг»: приложение само говорит, что делать -->
+      <div id="state-next" class="state-next hidden"></div>
+
+      <!-- инженерная сводка: все параметры на виду, 3 колонки -->
+      <dl class="kv kv-3">
+        <dt>Служба</dt><dd id="v-service">—</dd>
+        <dt>Стратегия</dt><dd id="v-strategy">—</dd>
+        <dt>Пресет</dt><dd id="v-preset">—</dd>
+        <dt>Процесс winws</dt><dd id="v-pid" class="mono">—</dd>
+        <dt>Версия zapret</dt><dd id="v-zver" class="mono">—</dd>
+        <dt>Трей</dt><dd id="v-tray">—</dd>
+      </dl>
+
+      <div class="btn-row">
+        <!-- контекстная primary-кнопка: label и действие задаёт renderState -->
+        <button id="btn-cta" class="btn primary hidden"></button>
+        <button id="btn-refresh" class="btn">Обновить</button>
+        <button class="btn" data-goto="strategies">Стратегии →</button>
       </div>
     </div>
+
+    <div class="card">
+      <div class="card-title">Пресеты</div>
+      <div id="preset-grid" class="preset-grid"></div>
+      <div id="preset-hint" class="note muted">Наведите на пресет — появится описание.</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title row-between">
+        <span>Последние пробы</span>
+        <span class="btn-row">
+          <button id="btn-quick-probe" class="btn">Проверить</button>
+          <button class="btn" data-goto="diagnostics">Диагностика →</button>
+        </span>
+      </div>
+      <div id="overview-probes" class="chips">—</div>
+    </div>
+
+  </section>
+
+  <!-- ═══ вкладка: стратегии ═══ -->
+  <section id="tab-strategies" class="panel">
+
+    <div class="card">
+      <div class="card-title">Выбор стратегии</div>
+      <p class="note muted">Стратегия — набор аргументов winws (обход конкретных
+        узлов). «Применить» меняет работу службы сейчас, «Запомнить» привязывает
+        выбор к пресету (применится при следующем применении пресета),
+        «Попробовать» проверяет стратегию пробами без сохранения.</p>
+      <div class="version-row">
+        <label class="field">стратегия
+          <select id="strategy-select"></select>
+        </label>
+        <label class="field">для пресета
+          <select id="strategy-preset"></select>
+        </label>
+        <button id="btn-apply-strategy" class="btn hidden">Применить</button>
+        <button id="btn-save-strategy" class="btn hidden">Запомнить</button>
+        <button id="btn-try-strategy" class="btn hidden">Попробовать без применения</button>
+        <span class="mono muted" id="strategy-current"></span>
+        <span class="mono muted" id="strategy-layout"></span>
+      </div>
+
+      <!-- разбор аргументов winws: выбор стратегии вслепую по имени
+           файла был гаданием, теперь видно что она делает и чем
+           отличается от стоящей -->
+      <div id="strategy-detail" class="note muted hidden"></div>
+
+      <div class="strategy-row">
+        <label class="check" title="Подбор при запуске и после проб с сбоями">
+          <input type="checkbox" id="auto-strategy"> авто-режим
+        </label>
+        <span id="strategy-note" class="note muted"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Перебор стратегий</div>
+      <p class="note muted">Служба пересоздаётся для каждой стратегии: перебор
+        проверяет все цели и предлагает лучшую.</p>
+      <div class="btn-row">
+        <button id="btn-select" class="btn primary">Перебрать стратегии</button>
+        <button id="btn-select-cancel" class="btn danger" disabled>Прервать</button>
+        <button id="btn-take-best" class="btn hidden">★ Взять лучшую</button>
+        <span id="select-progress" class="mono muted"></span>
+      </div>
+      <div class="progress"><div id="select-bar" class="progress-fill" style="width:0%"></div></div>
+      <div class="table-wrap">
+        <table class="table" id="select-table">
+          <thead><tr><th>Стратегия</th><th>Состояние</th><th>Счёт</th>
+            <th>discord</th><th>youtube</th><th>ea</th><th>ubisoft</th></tr></thead>
+          <tbody><tr><td colspan="7" class="muted">нет данных</td></tr></tbody>
+        </table>
+      </div>
+      <div id="select-best" class="note hidden"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">A/B-тест</div>
+      <p class="note muted">Служба будет остановлена и запущена заново: сравнение
+        «с обходом» и «без обхода» отделяет поломку zapret от блокировки DPI.</p>
+      <div class="btn-row">
+        <label class="field">группа
+          <select id="ab-group">
+            <option value="discord">discord</option>
+            <option value="youtube">youtube</option>
+            <option value="ea">ea</option>
+            <option value="ubisoft" selected>ubisoft</option>
+          </select>
+        </label>
+        <button id="btn-ab" class="btn primary">Запустить A/B</button>
+      </div>
+      <div id="ab-result" class="verdict hidden"></div>
+    </div>
+
+  </section>
+
+  <!-- ═══ вкладка: установка ═══ -->
+  <section id="tab-install" class="panel">
+
+    <div class="card">
+      <div class="card-title">Версии zapret</div>
+      <div class="version-row">
+        <label class="field">версия
+          <select id="version-select"></select>
+        </label>
+        <button id="btn-switch-version" class="btn hidden">Переключить</button>
+        <button id="btn-rollback" class="btn hidden">Откатиться</button>
+        <button id="btn-remove-version" class="btn danger hidden">Удалить выбранную</button>
+      </div>
+      <div class="btn-row">
+        <button id="btn-check-update" class="btn">Проверить обновление</button>
+        <button id="btn-check-install" class="btn">Проверить файлы</button>
+        <button id="btn-install" class="btn primary">Скачать последний релиз</button>
+        <button id="btn-pick-dir" class="btn">Указать папку…</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Скачивание версий</div>
+      <div class="btn-row">
+        <label class="field">источник
+          <select id="release-repo"></select>
+        </label>
+        <button id="btn-list-releases" class="btn">Показать версии</button>
+      </div>
+      <div class="table-wrap">
+        <table class="table" id="release-table">
+          <thead><tr><th>Версия</th><th>Дата</th><th>Размер</th>
+            <th></th></tr></thead>
+          <tbody><tr><td colspan="4" class="muted">
+            нажмите «Показать версии» — список придёт с GitHub
+          </td></tr></tbody>
+        </table>
+      </div>
+      <div id="release-note" class="note muted"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Перенос связки</div>
+      <p class="note muted">Экспорт сохраняет пресет + стратегию + списки
+        исключений одним файлом — перенос на другую машину.</p>
+      <div class="btn-row">
+        <button id="btn-export-preset" class="btn">Экспорт текущего</button>
+        <button id="btn-import-preset" class="btn">Импорт связки…</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Интерфейс</div>
+      <div class="strategy-row">
+        <label class="check" title="Иконка в трее: меню меняет пресет и стратегию, обход при этом не выключается">
+          <input type="checkbox" id="tray-enabled"> трей
+        </label>
+        <button id="btn-hide-window" class="btn">Скрыть окно</button>
+        <span id="tray-note" class="note muted"></span>
+      </div>
+    </div>
+
   </section>
 
   <!-- ═══ вкладка: диагностика ═══ -->
@@ -207,42 +278,27 @@
         <button id="btn-pg-remove" class="btn danger">Удалить группу</button>
       </div>
     </div>
+  </section>
 
-    <div class="card">
-      <div class="card-title">A/B-тест</div>
-      <p class="note muted">Служба будет остановлена и запущена заново: сравнение
-        «с обходом» и «без обхода» отделяет поломку zapret от блокировки DPI.</p>
-      <div class="btn-row">
-        <label class="field">группа
-          <select id="ab-group">
-            <option value="discord">discord</option>
-            <option value="youtube">youtube</option>
-            <option value="ea">ea</option>
-            <option value="ubisoft" selected>ubisoft</option>
-          </select>
-        </label>
-        <button id="btn-ab" class="btn primary">Запустить A/B</button>
+  <!-- ═══ вкладка: журнал ═══ -->
+  <section id="tab-journal" class="panel">
+    <div class="card grow">
+      <div class="card-title row-between">
+        <span>Журнал</span>
+        <span class="btn-row">
+          <label class="field tiny">уровень
+            <select id="log-filter">
+              <option value="all">все</option>
+              <option value="info">info</option>
+              <option value="warning">warning</option>
+              <option value="error">error</option>
+            </select>
+          </label>
+          <button id="btn-log-copy" class="btn">Копировать</button>
+          <button id="btn-log-open" class="btn">Открыть файл</button>
+        </span>
       </div>
-      <div id="ab-result" class="verdict hidden"></div>
-    </div>
-
-    <div class="card">
-      <div class="card-title">Перебор стратегий</div>
-      <div class="btn-row">
-        <button id="btn-select" class="btn primary">Перебрать стратегии</button>
-        <button id="btn-select-cancel" class="btn danger" disabled>Прервать</button>
-        <button id="btn-take-best" class="btn hidden">★ Взять лучшую</button>
-        <span id="select-progress" class="mono muted"></span>
-      </div>
-      <div class="progress"><div id="select-bar" class="progress-fill" style="width:0%"></div></div>
-      <div class="table-wrap">
-        <table class="table" id="select-table">
-          <thead><tr><th>Стратегия</th><th>Состояние</th><th>Счёт</th>
-            <th>discord</th><th>youtube</th><th>ea</th><th>ubisoft</th></tr></thead>
-          <tbody><tr><td colspan="7" class="muted">нет данных</td></tr></tbody>
-        </table>
-      </div>
-      <div id="select-best" class="note hidden"></div>
+      <div id="log-view" class="log-view"></div>
     </div>
   </section>
 
@@ -298,28 +354,6 @@
           <div id="tg-note" class="note muted"></div>
         </div>
       </div>
-    </div>
-  </section>
-
-  <!-- ═══ вкладка: журнал ═══ -->
-  <section id="tab-journal" class="panel">
-    <div class="card grow">
-      <div class="card-title row-between">
-        <span>Журнал</span>
-        <span class="btn-row">
-          <label class="field tiny">уровень
-            <select id="log-filter">
-              <option value="all">все</option>
-              <option value="info">info</option>
-              <option value="warning">warning</option>
-              <option value="error">error</option>
-            </select>
-          </label>
-          <button id="btn-log-copy" class="btn">Копировать</button>
-          <button id="btn-log-open" class="btn">Открыть файл</button>
-        </span>
-      </div>
-      <div id="log-view" class="log-view"></div>
     </div>
   </section>
 </main>

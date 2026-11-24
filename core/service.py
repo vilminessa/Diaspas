@@ -24,6 +24,12 @@ from pathlib import Path
 from . import paths
 from i18n import tr
 
+# Дочерний консольный процесс (sc, schtasks) от GUI-сборки (console=False)
+# без этого флага создаёт видимое окно консоли: у родителя консоли нет,
+# и Windows выделяет новую. Фоновый опрос state() дёргает sc каждые 5 с -
+# без флага окна моргали бы постоянно.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
 TASK_NAME = "DiaspasService"
 RUNNER_NAME = "service_runner.ps1"
 _REQUEST = "request.json"
@@ -215,7 +221,8 @@ def write_runner() -> Path:
 def task_exists() -> bool:
     try:
         out = subprocess.run([_schtasks(), "/Query", "/TN", TASK_NAME],
-                             capture_output=True, timeout=25)
+                             capture_output=True, timeout=25,
+                             creationflags=_NO_WINDOW)
     except (OSError, subprocess.SubprocessError):
         return False
     return out.returncode == 0
@@ -323,12 +330,14 @@ def run_action(action: str, payload: dict | None = None, wait: float = 60.0,
 
     if have_task:
         subprocess.run([_schtasks(), "/End", "/TN", TASK_NAME],
-                       capture_output=True, timeout=25)
+                       capture_output=True, timeout=25,
+                       creationflags=_NO_WINDOW)
         time.sleep(1.0)
         launched = False
         for _ in range(3):
             out = subprocess.run([_schtasks(), "/Run", "/TN", TASK_NAME],
-                                 capture_output=True, timeout=30)
+                                 capture_output=True, timeout=30,
+                                 creationflags=_NO_WINDOW)
             if out.returncode == 0:
                 launched = True
                 break
@@ -398,7 +407,8 @@ def _state_local() -> ServiceState:
     exit_code = 0
     try:
         out = subprocess.run(["sc", "query", "zapret"],
-                             capture_output=True, timeout=15)
+                             capture_output=True, timeout=15,
+                             creationflags=_NO_WINDOW)
         text = (out.stdout or b"").decode("cp1251", "replace")
         running = "RUNNING" in text
         installed = out.returncode == 0

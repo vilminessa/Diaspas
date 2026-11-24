@@ -267,11 +267,17 @@ def test_hello_carries_build_label(tmp_path, monkeypatch):
     assert app.hello()["label"] == "v0.1.2"
 
 
-def test_index_has_create_service_button():
-    """Кнопка «Создать службу» должна существовать в разметке."""
+def test_index_has_contextual_cta():
+    """Контекстная primary-кнопка (создать службу/восстановить/скачать) есть."""
     from ui.bundle import INDEX_HTML
-    assert 'id="btn-create-service"' in INDEX_HTML
+    assert 'id="btn-cta"' in INDEX_HTML
     assert 'class="btn primary hidden"' in INDEX_HTML
+
+
+def test_index_has_next_step_hint():
+    """Подсказка «следующий шаг» существует: состояние само говорит, что делать."""
+    from ui.bundle import INDEX_HTML
+    assert 'id="state-next"' in INDEX_HTML
 
 
 # -- дрейф пресета: маркер есть, но состояние ему не отвечает ----------
@@ -341,7 +347,10 @@ def test_suggested_falls_back_to_last_known(tmp_path, monkeypatch):
 
 
 def test_index_has_restore_button():
-    """Кнопка восстановления должна существовать в разметке (скрыта)."""
+    """Восстановление после перезапуска доступно через контекстную CTA."""
     from ui.bundle import INDEX_HTML
-    assert 'id="btn-restore-after-restart"' in INDEX_HTML
-    assert 'class="btn primary hidden"' in INDEX_HTML
+    assert 'id="btn-cta"' in INDEX_HTML
+    # подпись задаёт renderState в app.js — следим, что текст не пропал
+    app_js = (Path(__file__).resolve().parents[1] / "ui_src" / "app.js")
+    assert "Восстановить после перезапуска" in app_js.read_text(
+        encoding="utf-8")
