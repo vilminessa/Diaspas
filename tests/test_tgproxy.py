@@ -192,7 +192,91 @@ def test_state_quick_shape(monkeypatch):
     monkeypatch.setattr(tgproxy, "_image_pids", lambda: [])
     st = tgproxy.state(quick=True)
     for key in ("installed", "running", "port", "link", "autostart",
-                "zapret_list", "config_found"):
+                "zapret_list", "config_found", "connected", "clients"):
         assert key in st
     assert st["running"] is False
+    assert st["connected"] is False and st["clients"] == 0   # прокси не запущен
     assert "listening" not in st and "foreign" not in st   # quick не гоняет
+
+
+# -- подключение клиента к прокси ---------------------------------------------
+
+def test_parse_client_pids_filters_by_state_and_port():
+    """Таблица TCP: только Established с remote-портом прокси, свои PID."""
+    import socket as s
+    import struct
+
+    def row(state, rport, pid):
+        # MIB_TCPROW_OWNER_PID: state, laddr, lport, raddr, rport, pid;
+        # порты в network byte order (как их отдаёт Windows)
+        return struct.pack("<6I", state, 0, 0, 0, s.htons(rport), pid)
+
+    buf = (struct.pack("<I", 4)
+           + row(5, 1080, 111)     # Established, remote=1080 -> наш
+           + row(5, 443, 222)      # Established, чужой порт -> мимо
+           + row(2, 1080, 333)     # LISTEN -> мимо
+           + row(5, 1080, 111))    # дубль соединения того же клиента
+    # клиент один (несколько соединений) -> PID не дублируется
+    assert tgproxy._parse_client_pids(buf, 1080) == [111]
+
+
+def test_parse_client_pids_short_buffer_is_safe():
+    assert tgproxy._parse_client_pids(b"", 1080) == []
+    assert tgproxy._parse_client_pids(b"\x01\x00", 1080) == []
+
+
+def test_connect_dialog_no_secret(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    cfg_dir = tmp_path / "TgWsProxy"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.json").write_text(json.dumps({"port": 1080}),
+                                         encoding="utf-8")
+    res = tgproxy.connect_dialog()
+    assert res["ok"] is False and "секрета" in res["error"]
+
+
+def test_connect_dialog_opens_tg_link(tmp_path, monkeypatch):
+    """Диалог подключения: os.startfile(tg://...) - Telegram покажет «Add proxy?»."""
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    cfg_dir = tmp_path / "TgWsProxy"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.json").write_text(
+        json.dumps({"port": 1443, "secret": "beef"}), encoding="utf-8")
+    monkeypatch.setattr(tgproxy, "_image_pids", lambda: [4242])
+    opened: list[str] = []
+    monkeypatch.setattr(tgproxy.os, "startfile",
+                        lambda link: opened.append(link))
+
+    res = tgproxy.connect_dialog()
+    assert res["ok"] is True and res["running"] is True
+    assert opened and opened[0].startswith("tg://proxy?server=127.0.0.1")
+    assert "secret=" in opened[0]
+
+
+def test_check_connection_reports_telegram(tmp_path, monkeypatch):
+    """Проверка подключения: клиенты на порту + имя процесса = Telegram."""
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    cfg_dir = tmp_path / "TgWsProxy"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.json").write_text(json.dumps({"port": 1080}),
+                                         encoding="utf-8")
+    monkeypatch.setattr(tgproxy, "_proxy_client_pids", lambda port: [4242])
+    monkeypatch.setattr(tgproxy, "_paths_of_pids",
+                        lambda pids: ["C:\\\\AppData\\\\Telegram\\\\Telegram.exe"])
+
+    res = tgproxy.check_connection()
+    assert res["ok"] and res["connected"] is True
+    assert res["clients"] == 1 and res["pids"] == [4242]
+    assert res["telegram"] is True
+
+
+def test_check_connection_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    monkeypatch.setattr(tgproxy, "_proxy_client_pids", lambda port: [])
+    monkeypatch.setattr(tgproxy, "_paths_of_pids",
+                        lambda pids: (_ for _ in ()).throw(
+                            AssertionError("без PID PowerShell не нужен")))
+
+    res = tgproxy.check_connection()
+    assert res["ok"] and res["connected"] is False
+    assert res["clients"] == 0 and res["telegram"] is False

@@ -24,6 +24,7 @@ import json
 import os
 import shutil
 import socket
+import struct
 import subprocess
 import time
 import urllib.error
@@ -316,12 +317,16 @@ def _image_pids() -> list[int]:
 
 
 def _paths_of_pids(pids: list[int]) -> list[str]:
-    """Пулы exe по PID - одной PowerShell-командой (для чужих копий)."""
+    """Пулы exe по PID - одной PowerShell-командой (для чужих копий).
+
+    WQL для Win32_Process не принимает ``ProcessId in (...)`` (отклоняет
+    весь фильтр) - собираем ``ProcessId=N OR ...``; для одного PID - как есть.
+    """
     if not pids:
         return []
-    ids = ",".join(str(p) for p in pids)
-    cmd = ("Get-CimInstance Win32_Process -Filter \"ProcessId in (" + ids +
-           ")\" | ForEach-Object { $_.ExecutablePath }")
+    cond = " OR ".join("ProcessId=%d" % p for p in dict.fromkeys(pids))
+    cmd = ("Get-CimInstance Win32_Process -Filter \"" + cond +
+           "\" | ForEach-Object { $_.ExecutablePath }")
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command", cmd],
@@ -330,6 +335,99 @@ def _paths_of_pids(pids: list[int]) -> list[str]:
     except (OSError, subprocess.SubprocessError):
         return []
     return [ln.strip() for ln in (out.stdout or "").splitlines() if ln.strip()]
+
+
+# -- подключение клиента к прокси ------------------------------------------
+
+def _parse_client_pids(buf: bytes, port: int) -> list[int]:
+    """PID Established-клиентов на порт из буфера GetExtendedTcpTable.
+
+    Чистая функция (без ctypes) - её покрываютюнит-тесты на крафщенной
+    таблице. Формат: DWORD dwNumEntries, далее строки по 24 байта
+    (MIB_TCPROW_OWNER_PID: state, laddr, lport, raddr, rport, pid);
+    порты лежат в network byte order.
+    """
+    out: list[int] = []
+    if len(buf) < 4:
+        return out
+    (num,) = struct.unpack_from("<I", buf, 0)
+    for i in range(num):
+        off = 4 + i * 24
+        if off + 24 > len(buf):
+            break
+        state, _la, _lp, _ra, rp, pid = struct.unpack_from("<6I", buf, off)
+        if state != 5:                     # MIBTCP_STATE_ESTAB
+            continue
+        if socket.ntohs(rp & 0xFFFF) == port:   # клиентский сокет: remote = прокси
+            if pid not in out:             # у одного клиента несколько соединений
+                out.append(pid)
+    return out
+
+
+def _proxy_client_pids(port: int) -> list[int]:
+    """PID подключённых к прокси клиентов (iphlpapi, один системный вызов).
+
+    Без subprocess - годится для фонового опроса раз в 5 с: читает таблицу
+    TCP ядра напрямую, ничего не порождает и не мигает окнами.
+    """
+    import ctypes
+    from ctypes import wintypes
+    AF_INET = 2
+    TABLE_CLASS = 4          # TCP_TABLE_OWNER_PID_CONNECTIONS
+    ERROR_INSUFFICIENT_BUFFER = 122
+    iphlp = ctypes.WinDLL("iphlpapi", use_last_error=True)
+    fn = iphlp.GetExtendedTcpTable
+    fn.argtypes = [wintypes.LPVOID, wintypes.LPDWORD, wintypes.BOOL,
+                   wintypes.DWORD, wintypes.DWORD, wintypes.DWORD]
+    fn.restype = wintypes.DWORD
+    size = wintypes.DWORD(0)
+    fn(None, ctypes.byref(size), False, AF_INET, TABLE_CLASS, 0)  # замер
+    for _ in range(3):
+        if size.value == 0:
+            return []
+        buf = ctypes.create_string_buffer(size.value)
+        ret = fn(buf, ctypes.byref(size), False, AF_INET, TABLE_CLASS, 0)
+        if ret == 0:                         # NO_ERROR
+            return _parse_client_pids(buf.raw[:size.value], port)
+        if ret != ERROR_INSUFFICIENT_BUFFER:
+            return []
+        # таблица выросла между вызовами - буфер обновлён, повторяем
+    return []
+
+
+def connect_dialog() -> dict:
+    """Открыть диалог подключения прокси в Telegram (tg://proxy-ссылка).
+
+    Windows отдаёт tg:// зарегистрированному обработчику - Telegram
+    показывает «Add proxy?». Прокси должен быть запущен: не запущен -
+    сообщаем в ответе, но ссылку всё равно открываем (настройку можно
+    сделать заранее).
+    """
+    cfg = read_config()
+    link = build_link(cfg_host(cfg), cfg_port(cfg), cfg_secret(cfg))
+    if not link:
+        return {"ok": False,
+                "error": "в конфиге нет секрета - сначала запустите прокси"}
+    try:
+        os.startfile(link)  # noqa: S606 - tg:// обрабатывает Telegram
+    except OSError as exc:
+        return {"ok": False, "error": f"Telegram не открыл ссылку: {exc}"}
+    return {"ok": True, "link": link, "running": bool(_image_pids())}
+
+
+def check_connection() -> dict:
+    """Кто подключён к прокси: число клиентов, их exe, есть ли Telegram."""
+    port = cfg_port()
+    pids = _proxy_client_pids(port)
+    paths = _paths_of_pids(pids) if pids else []
+    return {
+        "ok": True,
+        "connected": bool(pids),
+        "clients": len(pids),
+        "pids": pids,
+        "paths": paths,
+        "telegram": any("telegram" in p.lower() for p in paths),
+    }
 
 
 def listening(host: str, port: int, timeout: float = 0.4) -> bool:
@@ -519,6 +617,9 @@ def state(quick: bool = False) -> dict:
     port = cfg_port(cfg)
     pids = _image_pids()
     link = build_link(host, port, cfg_secret(cfg))
+    # клиенты на порту: один вызов GetExtendedTcpTable, без subprocess -
+    # kv «Подключение» живёт в фоновом опросе и не мигает консолями
+    clients = len(_proxy_client_pids(port)) if pids else 0
     out: dict = {
         "installed": exe.is_file(),
         "path": str(exe) if exe.is_file() else None,
@@ -531,6 +632,8 @@ def state(quick: bool = False) -> dict:
         "autostart": autostart_enabled(),
         "zapret_list": zapret_list_enabled(),
         "config_found": config_file().is_file(),
+        "connected": clients > 0,
+        "clients": clients,
     }
     if not quick:
         out["listening"] = bool(pids) and listening(host, port)

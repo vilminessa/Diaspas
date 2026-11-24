@@ -1687,6 +1687,9 @@ async function init() {
     $("#tg-tag").textContent = tg.tag || "—";
     $("#tg-addr").textContent = tg.host + ":" + tg.port +
       (tg.link ? " · ссылка готова" : " · секрета нет");
+    // подключение: клиенты на порту (событие state каждые 5 с)
+    $("#tg-conn").textContent = !tg.installed ? "—"
+      : (tg.connected ? `да · клиентов ${tg.clients}` : "нет клиентов");
     $("#tg-auto").textContent = tg.autostart ? "вкл" : "выкл";
     $("#tg-zlist").textContent = tg.zapret_list ? "добавлены" : "не добавлены";
     $("#tg-btn-autostart").textContent =
@@ -1770,6 +1773,27 @@ async function init() {
     }
   };
   $("#tg-btn-dir").onclick = () => tgCall("tg_open_dir");
+  $("#tg-btn-connect").onclick = async () => {
+    const res = await tgCall("tg_connect");
+    if (res && res.ok) {
+      toast(res.running
+        ? "Диалог подключения открыт — подтвердите в Telegram"
+        : "Диалог открыт, но прокси не запущен — сначала «Запустить»",
+        res.running ? "ok" : "");
+    }
+  };
+  $("#tg-btn-check-conn").onclick = async () => {
+    const res = await tgCall("tg_check_conn");
+    if (res && res.ok) {
+      if (res.connected) {
+        toast(`Подключено: клиентов ${res.clients}` +
+              (res.telegram ? " (Telegram)" : ""), "ok");
+      } else {
+        toast("Клиентов нет — Telegram не подключён к прокси", "err");
+      }
+      await tgRefresh();
+    }
+  };
   $("#tg-btn-autostart").onclick = async () => {
     const res = await tgCall("tg_autostart", !(T && T.autostart));
     if (res && res.ok) await tgRefresh();

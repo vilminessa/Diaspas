@@ -1428,6 +1428,27 @@ class App:
                              "и подключитесь из трея вручную"}
         return {"ok": True, "link": link}
 
+    def tg_connect(self) -> dict:
+        """Открыть системный диалог подключения прокси в Telegram."""
+        res = tgproxy.connect_dialog()
+        if res.get("ok"):
+            self.log("info", "TgWsProxy: открыт диалог подключения в Telegram"
+                     + ("" if res.get("running")
+                        else " (прокси не запущен - сначала «Запустить»)"))
+        else:
+            self.log("error", f"TgWsProxy: подключение: {res.get('error')}")
+        return res
+
+    def tg_check_conn(self) -> dict:
+        """Кто подключён к прокси: число клиентов и есть ли Telegram."""
+        res = tgproxy.check_connection()
+        if res.get("ok"):
+            self.log("info", "TgWsProxy: подключение - "
+                     + (f"клиентов {res['clients']}"
+                        + (" (Telegram)" if res.get("telegram") else "")
+                        if res.get("connected") else "клиентов нет"))
+        return res
+
     def tg_open_dir(self) -> dict:
         """Открыть %APPDATA%\\TgWsProxy (конфиг и логи прокси)."""
         try:
@@ -1623,6 +1644,8 @@ def run() -> int:
     api.tg_check_update = guard(app.tg_check_update)
     api.tg_autostart = guard(app.tg_autostart)
     api.tg_link = guard(app.tg_link)
+    api.tg_connect = guard(app.tg_connect)
+    api.tg_check_conn = guard(app.tg_check_conn)
     api.tg_open_dir = guard(app.tg_open_dir)
     api.tg_install = op("установка TgWsProxy")(guard(app.tg_install))
     api.tg_start = op("старт TgWsProxy")(guard(app.tg_start))
